@@ -45,6 +45,18 @@ import { readAgentBalances } from "../../lib/agent-wallets";
 import { STELLAR_NETWORK, requireMarketContractId } from "../../lib/stellar";
 import { unitsToUsdc } from "../../lib/usdc";
 import { reportingPoll } from "../../lib/ops/heartbeat";
+import {
+  BackoffError,
+  DependencyFailureError,
+  MalformedInputError,
+  StaleStateError,
+  DuplicateActionError,
+  CancelledByOperatorError,
+  PausedWorkerError,
+  COUNCIL_BACKOFF,
+  describeBackoffError,
+  withBackoff,
+} from "../../lib/ops/backoff-policies";
 import { activeLLMProvider, activeLLMModel, activeLLMKeyFingerprint } from "../../lib/llm";
 import {
   listCouncilPersonas,
@@ -62,6 +74,8 @@ import {
 import { runPersonaForClaim } from "./shared/persona-runner";
 import { buyPeerReasoning } from "./shared/peer-reasoning";
 import { toClaimOnChain } from "./shared/types";
+import { maxAgeForCategory } from "./shared/evidence-freshness";
+import { validateEvidenceIntegrity } from "./shared/evidence-integrity";
 import type {
   ClaimOnChain,
   PersonaRunnerContext,
@@ -82,6 +96,67 @@ const PEER_READS_PER_PERSONA = Number(process.env.COUNCIL_PEER_READS_PER_PERSONA
 const PEER_READ_DELAY_MS   = Number(process.env.COUNCIL_PEER_READ_DELAY_MS ?? 15000);
 const PEER_READ_CAP_USDC   = Number(process.env.COUNCIL_PEER_READ_CAP_USDC ?? "0.003");
 const CONTRACT_ID          = requireMarketContractId();
+
+// ── Cross-cycle evidence cache ────────────────────────────────────────────────
+/**
+ * Module-level evidence cache that survives across poll cycles so we don't
+ * refetch the same resolution URL every cycle. Entries are keyed by
+ * `claimId:url` and carry a `fetchedAt` timestamp; entries younger than
+ * `maxAgeForCategory(category)` are reused, older ones are refetched.
+ *
+ * Bounded to EVIDENCE_CACHE_MAX_ENTRIES to keep memory in check; when full we
+ * evict the oldest entry (LRU-ish via insertion order). Entries for claims
+ * that are no longer joinable are evicted at the start of each cycle.
+ */
+const EVIDENCE_CACHE_MAX_ENTRIES = Number(process.env.COUNCIL_EVIDENCE_CACHE_MAX ?? 500);
+const evidenceCache = new Map<string, EvidenceCacheEntry>();
+
+function evidenceCacheKey(claimId: number, url: string): string {
+  return `${claimId}:${url}`;
+}
+
+/** Drop entries for claims that are no longer joinable. */
+function evictNonJoinableClaims(joinableIds: Set<number>): void {
+  for (const key of evidenceCache.keys()) {
+    const claimId = Number(key.slice(0, key.indexOf(":")));
+    if (!joinableIds.has(claimId)) {
+      evidenceCache.delete(key);
+    }
+  }
+}
+
+/** Enforce the entry cap by dropping the oldest inserted entries. */
+function enforceEvidenceCacheCap(): void {
+  while (evidenceCache.size > EVIDENCE_CACHE_MAX_ENTRIES) {
+    const oldest = evidenceCache.keys().next().value;
+    if (oldest === undefined) break;
+    evidenceCache.delete(oldest);
+  }
+}
+
+/**
+ * Return a fresh, integrity-validated cache entry for (claimId, url, category),
+ * or undefined if absent/stale/corrupt so the caller refetches.
+ */
+function getFreshEvidence(
+  claimId: number,
+  url: string,
+  category: string,
+  now: number,
+): EvidenceCacheEntry | undefined {
+  const entry = evidenceCache.get(evidenceCacheKey(claimId, url));
+  if (!entry) return undefined;
+  const maxAge = maxAgeForCategory(category);
+  if (now - entry.fetchedAt > maxAge) {
+    evidenceCache.delete(evidenceCacheKey(claimId, url));
+    return undefined;
+  }
+  if (!validateEvidenceIntegrity(entry)) {
+    evidenceCache.delete(evidenceCacheKey(claimId, url));
+    return undefined;
+  }
+  return entry;
+}
 
 // ── Env guard ─────────────────────────────────────────────────────────────────
 requireAnyLLMKey();
@@ -168,17 +243,23 @@ async function poll(): Promise<void> {
   try {
     total = await getClaimCount();
   } catch (err) {
-    console.warn("[council] Failed to read the claim count:", err);
-    return;
+    const depErr = new DependencyFailureError(
+      `Failed to read the claim count: ${err instanceof Error ? err.message : String(err)}`,
+      "rpc",
+      true,
+      0,
+      err,
+    );
+    console.warn(`[council] ${describeBackoffError(depErr)}`);
+    throw depErr;
   }
 
   console.log(
     `\n[council] ── Poll at ${new Date().toISOString()} ── ${total} claims, ${ACTIVE_PERSONAS.length} personas`,
   );
 
-  // Shared per-cycle evidence cache — one HTTP fetch per claim no matter
-  // how many personas need it.
-  const evidenceCache = new Map<number, EvidenceCacheEntry>();
+  // Shared cross-cycle evidence cache — one HTTP fetch per claim no matter
+  // how many personas need it, reused across cycles while fresh.
   const peerReasoning = new Map<string, string[]>();
   const ctx: PersonaRunnerContext = {
     contractId: CONTRACT_ID,
@@ -194,6 +275,10 @@ async function poll(): Promise<void> {
     const joinable = (claim.state === "open" || claim.state === "active") && claim.deadline > now;
     if (joinable) allClaims.push(claim);
   }
+  // Drop cached evidence for claims that are no longer joinable so memory
+  // tracks only live claims.
+  evictNonJoinableClaims(new Set(allClaims.map((c) => c.id)));
+  enforceEvidenceCacheCap();
   if (allClaims.length === 0) {
     console.log("[council] No joinable claims this round.");
     return;
@@ -239,13 +324,19 @@ async function poll(): Promise<void> {
             );
           }
         }
-        const receipt = await runPersonaForClaim(persona, claim, ctx);
+        const receipt = await withBackoff("council", () => runPersonaForClaim(persona, claim, ctx), {
+          policy: COUNCIL_BACKOFF,
+        });
         if (receipt) stakesThisCycle += 1;
       } catch (err) {
-        console.error(
-          `[council:${persona.slug}] error on claim #${claim.id}:`,
-          err instanceof Error ? err.message : err,
-        );
+        if (err instanceof BackoffError) {
+          console.warn(`[council:${persona.slug}] ${describeBackoffError(err)} on claim #${claim.id}`);
+        } else {
+          console.error(
+            `[council:${persona.slug}] error on claim #${claim.id}:`,
+            err instanceof Error ? err.message : err,
+          );
+        }
       }
       if (DECISION_DELAY_MS > 0) {
         await new Promise((resolve) => setTimeout(resolve, DECISION_DELAY_MS));
@@ -296,7 +387,8 @@ async function main(): Promise<void> {
   }
   console.log("═══════════════════════════════════════════════\n");
 
-  const safePoll = () => reportingPoll("council", "council", POLL_INTERVAL_MS / 1000, poll);
+  const safePoll = () =>
+    reportingPoll("council", "council", POLL_INTERVAL_MS / 1000, poll, { pause: "council_worker" });
 
   await safePoll();
   setInterval(safePoll, POLL_INTERVAL_MS);
