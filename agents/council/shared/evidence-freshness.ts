@@ -41,7 +41,6 @@
 
 import { RESEARCH_ADAPTERS } from "../../../lib/research/adapters";
 import type { EvidenceCacheEntry } from "./types";
-import { validateEvidenceIntegrity } from "./evidence-integrity";
 
 /** 10 minutes — tighter than the oracle's 15-min commitment window. */
 export const COUNCIL_DEFAULT_MAX_EVIDENCE_AGE_MS = 10 * 60_000;
@@ -102,6 +101,50 @@ export function maxAgeForCategory(category: string | undefined | null): number {
 }
 
 /**
+ * Module-level evidence cache shared across council cycles.
+ *
+ * Keyed by `claimId + "\u0000" + url` so the same claim/URL pair is fetched at
+ * most once per freshness window.  Entries carry `fetchedAt` so
+ * `checkEvidenceFreshness` can decide whether to reuse or refetch.
+ *
+ * Bounded to `EVIDENCE_CACHE_MAX_ENTRIES` to keep memory in check; when the cap
+ * is exceeded the oldest-inserted entries are evicted (Map preserves insertion
+ * order).
+ */
+export const EVIDENCE_CACHE_MAX_ENTRIES = 500;
+
+export interface CachedEvidenceEntry extends EvidenceCacheEntry {
+  fetchedAt: number;
+}
+
+const evidenceCache = new Map<string, CachedEvidenceEntry>();
+
+function evidenceCacheKey(claimId: string, url: string): string {
+  return `${claimId}\u0000${url}`;
+}
+
+/**
+ * Return a cached entry for `claimId`/`url` when it is still fresh for
+ * `category`; otherwise `undefined` (caller should refetch).
+ */
+export function getFreshCachedEvidence(
+  claimId: string,
+  url: string,
+  category: string | undefined | null,
+  now: number = Date.now(),
+): CachedEvidenceEntry | undefined {
+  const key = evidenceCacheKey(claimId, url);
+  const entry = evidenceCache.get(key);
+  if (entry === undefined) return undefined;
+  const result = checkEvidenceFreshness(entry, category, now);
+  if (!result.fresh) {
+    evidenceCache.delete(key);
+    return undefined;
+  }
+  return entry;
+}
+
+/**
  * Check whether `entry` is fresh enough for a persona to vote on.
  *
  * @param entry     The cache entry returned by `getOrFetchEvidence`.
@@ -154,31 +197,39 @@ export function checkEvidenceFreshness(
 }
 
 /**
- * Determine whether a cached entry may be reused for `claimId`/`url` at `now`.
- *
- * This is the single predicate the persistent council evidence cache uses to
- * decide between reusing an entry and refetching.  It combines the freshness
- * gate above with an integrity check so a corrupted or tampered entry is never
- * served from the cache even if it is still within its freshness window.
- *
- * Returns `{ fresh: true }` only when the entry is both fresh and valid.
+ * Store a freshly-fetched entry in the module-level cache, evicting the
+ * oldest-inserted entries when the cap is exceeded.
  */
-export function isCacheEntryReusable(
+export function setCachedEvidence(
+  claimId: string,
+  url: string,
   entry: EvidenceCacheEntry,
-  category: string | undefined | null,
   now: number = Date.now(),
-): EvidenceFreshnessResult {
-  const freshness = checkEvidenceFreshness(entry, category, now);
-  if (!freshness.fresh) return freshness;
-
-  if (!validateEvidenceIntegrity(entry)) {
-    return {
-      fresh:    false,
-      ageMs:    entry.fetchedAt !== undefined ? Math.max(0, now - entry.fetchedAt) : 0,
-      maxAgeMs: maxAgeForCategory(category),
-      reason:   "cached evidence failed integrity validation; treating as stale",
-    };
+): void {
+  const key = evidenceCacheKey(claimId, url);
+  evidenceCache.set(key, { ...entry, fetchedAt: now });
+  while (evidenceCache.size > EVIDENCE_CACHE_MAX_ENTRIES) {
+    const oldest = evidenceCache.keys().next();
+    if (oldest.done) break;
+    evidenceCache.delete(oldest.value);
   }
+}
 
-  return { fresh: true };
+/**
+ * Evict cached entries for claims that are no longer joinable.  Called once per
+ * council cycle with the current set of joinable claim ids.
+ */
+export function evictStaleClaims(joinableClaimIds: ReadonlySet<string>): void {
+  for (const key of evidenceCache.keys()) {
+    const sep = key.indexOf("\u0000");
+    const claimId = sep === -1 ? key : key.slice(0, sep);
+    if (!joinableClaimIds.has(claimId)) {
+      evidenceCache.delete(key);
+    }
+  }
+}
+
+/** Test-only: clear the module-level cache. */
+export function __clearEvidenceCacheForTests(): void {
+  evidenceCache.clear();
 }

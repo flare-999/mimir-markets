@@ -2,13 +2,13 @@
  * Evidence cache.
  *
  * 10 personas often look at the same claim in a single poll cycle.
- * Without caching, that's 10 HTTP fetches of the same resolution URL per claim per cycle — wasteful and rate-limit-prone.
+ * Without caching, that's 10 HTTP fetches of the same resolution URL per
+ * claim per cycle — wasteful and rate-limit-prone.
  *
- * The cache is module-level so it persists across council cycles. Entries are
- * keyed by claim id + resolution URL and carry a `fetchedAt` timestamp. An entry
- * is reused only while it is younger than `maxAgeForCategory(category)` and passes
- * `integrity validation. Entries for claims that are no longer joinable are evicted,
- * and the cache is capped to bound memory.
+ * The cache is now persisted at module level and keyed by claim id + URL, so
+ * consecutive council cycles can reuse evidence that is still young enough
+ * for its category (see {@link maxAgeForCategory}). Stale entries are
+ * refetched, and entries for claims that are no longer joinable are evicted.
  */
 
 import { sha256Hex } from "../../../lib/content-hash";
@@ -21,8 +21,8 @@ import type { EvidenceCacheEntry } from "./types";
 
 const MAX_CONTENT_CHARS = 8_000;
 
-/** Maximum number of entries kept in the module-level cache. */
-export const MAX_CACHE_ENTRIES = 500;
+/** Hard cap on the number of entries kept in the module-level cache. */
+const MAX_CACHE_ENTRIES = 500;
 
 /** The fetch used on a cache miss; injectable so tests need no network. */
 export type EvidenceFetcher = typeof fetchEvidenceShared;
@@ -33,6 +33,21 @@ export interface EvidenceIntegrityResult {
   success: boolean;
   /** Reason for failure, or empty string on success. */
   reason: string;
+}
+
+/** A cache entry plus the claim category used to compute its max age. */
+export interface CachedEvidenceEntry extends EvidenceCacheEntry {
+  claimId: number;
+  resolutionUrl: string;
+  category: string;
+}
+
+/** Module-level cache shared across council cycles. */
+const evidenceCache = new Map<string, CachedEvidenceEntry>();
+
+/** Build the cache key from claim id + resolution URL. */
+function cacheKey(claimId: number, resolutionUrl: string): string {
+  return `${claimId}$${resolutionUrl }${resolutionUrl}`;
 }
 
 /**
@@ -69,59 +84,49 @@ export function validateEvidenceIntegrity(entry: EvidenceCacheEntry): EvidenceIn
   return { success: true, reason: "" };
 }
 
-/** Key for the module-level cache: claim id + resolution URL. */
-export function evidenceCacheKey(claimId: number, resolutionUrl: string): string {
-  return `${claimId}:${resolutionUrl ?? ""}`;
+/** True if the entry is within its category's freshness window. */
+function isFresh(entry: CachedEvidenceEntry, now: number): boolean {
+  if (typeof entry.fetchedAt !== "number" || !constants.isFinite(entry.fetchedAt)) {
+    return false;
+  }
+  const maxAge = maxAgeForCategory(entry.category);
+  return now - entry.fetchedAt < maxAge;
 }
 
-/** Module-level cache shared across council cycles. */
-const evidenceCache = new Map<string, EvidenceCacheEntry>();
-
-/** Return the shared cache (for tests / inspection). */
-export function getEvidenceCache(): Map<string, EvidenceCacheEntry> {
-  return evidenceCache;
-}
-
-/** Clear the shared cache (tests / shutdown). */
-export function clearEvidenceCache(): void {
-  evidenceCache.clear();
-}
-
-/** Evict cache entries for claims that are no longer joinable. */
-export function evictNonJoinableClaims(joinableClaimIds: ReadonlySet<number>): void {
-  for (const key of evidenceCache.keys()) {
-    const claimId = Number(key.slice(0, key.indexOf(":")));
-    if (!Number.isFinite(claimId) || !joinableClaimIds.has(claimId)) {
+/** Evict entries for claims that are no longer joinable. */
+export function evictUnjoinableClaims(joinableClaimIds: ReadonlySet<number>): void {
+  for (const [key, entry] of evidenceCache) {
+    if (!joinableClaimIds.has(entry.claimId)) {
       evidenceCache.delete(key);
     }
   }
 }
 
-/** Drop the oldest entries once the cache exceeds its cap. */
+/** Clear the module-level cache (tests / admin tooling). */
+export function clearEvidenceCache(): void {
+  evidenceCache.clear();
+}
+
+/** Current number of entries in the cache (tests / observability). */
+export function evidenceCacheSize(): number {
+  return evidenceCache.size;
+}
+
+/** Ensure the cache never exceeds the hard cap by evicting oldest entries. */
 function enforceCap(): void {
-  if (evidenceCache.size <= MAX_CACHE_ENTRIES) return;
-  const excess = evidenceCache.size - MAX_CACHE_ENTRIES;
-  let dropped = 0;
-  for (const key of evidenceCache.keys()) {
-    evidenceCache.delete(key);
-    if (++dropped >= excess) break;
+  while (evidenceCache.size > MAX_CACHE_ENTRIES) {
+    const oldestKey = evidenceCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    evidenceCache.delete(oldestKey);
   }
 }
 
-/** True if the entry is within its category's freshness window. */
-export function isFresh(
-  entry: EvidenceCacheEntry,
-  category: string,
-  now: number = Date.now(),
-): boolean {
-  if (typeof entry.fetchedAt !== "number" || !Number.isFinite(entry.fetchedAt)) {
-    return false;
-  }
-  const maxAge = maxAgeForCategory(category);
-  if (typeof maxAge !== "number" || !Number.isFinite(maxAge) || maxAge <= 0) {
-    return false;
-  }
-  return now - entry.fetchedAt < maxAge;
+function storeEntry(entry: CachedEvidenceEntry): void {
+  const key = cacheKey(entry.claimId, entry.resolutionUrl);
+  // Re-set to move to the end of the iteration order (LRU-like).
+  evidenceCache.delete(key);
+  evidenceCache.set(key, entry);
+  enforceCap();
 }
 
 export async function getOrFetchEvidence(
@@ -129,44 +134,49 @@ export async function getOrFetchEvidence(
   resolutionUrl: string,
   category: string,
   fetcher: EvidenceFetcher = fetchEvidenceShared,
+  now: number = Date.now(),
 ): Promise<EvidenceCacheEntry> {
-  const key = evidenceCacheKey(claimId, resolutionUrl);
+  const key = cacheKey(claimId, resolutionUrl);
   const hit = evidenceCache.get(key);
   if (hit) {
-    if (isFresh(hit, category) && validateEvidenceIntegrity(hit).success) {
+    const integrity = validateEvidenceIntegrity(hit);
+    if (integrity.success && isFresh(hit, now)) {
       return hit;
     }
+    // Stale or corrupted entry: drop it and refetch.
     evidenceCache.delete(key);
   }
 
   if (!resolutionUrl?.startsWith("http")) {
-    const text = "(No resolution URL provided)";
-    const empty: EvidenceCacheEntry = {
-      text,
+    const empty: CachedEvidenceEntry = {
+      claimId,
+      resolutionUrl,
+      category,
+      text:    "(No resolution URL provided)",
       fetcher: "none",
-      hash: sha256Hex(text),
-      fetchedAt: Date.now(),
-      sourceUrl: resolutionUrl,
+      hash:    sha256Hex("(No resolution URL provided)"),
+      fetchedAt: now,
     };
-    evidenceCache.set(key, empty);
-    enforceCap();
+    storeEntry(empty);
     return empty;
   }
 
- try {
+  try {
     const snap = await fetcher(resolutionUrl, {
       maxChars:  MAX_CONTENT_CHARS,
       userAgent: "Mimir-Council/1.0",
     });
-    const entry: EvidenceCacheEntry = {
+    const entry: CachedEvidenceEntry = {
+      claimId,
+      resolutionUrl,
+      category,
       text:      snap.text,
       fetcher:   snap.fetcher,
       hash:      sha256Hex(snap.text),
-      fetchedAt: snap.fetchedAt ?? Date.now(),
+      fetchedAt: snap.fetchedAt ?? now,
       sourceUrl: snap.sourceUrl,
     };
-    evidenceCache.set(key, entry);
-    enforceCap();
+    storeEntry(entry);
     return entry;
   } catch (err: unknown) {
     const msg =
@@ -175,16 +185,16 @@ export async function getOrFetchEvidence(
         : err instanceof Error
           ? err.message
           : "unknown";
-    const text = `(Failed to fetch: ${msg})`;
-    const failed: EvidenceCacheEntry = {
-      text,
+    const failed: CachedEvidenceEntry = {
+      claimId,
+      resolutionUrl,
+      category,
+      text:     `(Failed to fetch: ${msg})`,
       fetcher: "none",
-      hash: sha256Hex(text),
-      fetchedAt: Date.now(),
-      sourceUrl: resolutionUrl,
+      hash:    sha256Hex(`(Failed to fetch: ${msg})`),
+      fetchedAt: now,
     };
-    evidenceCache.set(key, failed);
-    enforceCap();
+    storeEntry(failed);
     return failed;
   }
 }

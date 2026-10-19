@@ -40,11 +40,11 @@
 applyWorkerGeminiKey("COUNCIL_GEMINI_API_KEY");
 
 import { requireAnyLLMKey, applyWorkerGeminiKey } from "../../lib/agent-bootstrap";
-import { getClaimCount, readClaimRaw } from "../../lib/contract";
+import { getClaimCount, readClaimRaw, readClaimsBatch } from "../../lib/contract";
 import { readAgentBalances } from "../../lib/agent-wallets";
 import { STELLAR_NETWORK, requireMarketContractId } from "../../lib/stellar";
 import { unitsToUsdc } from "../../lib/usdc";
-import { reportingPoll } from "../../lib/ops/heartbeat";
+import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
 import {
   BackoffError,
   DependencyFailureError,
@@ -74,8 +74,7 @@ import {
 import { runPersonaForClaim } from "./shared/persona-runner";
 import { buyPeerReasoning } from "./shared/peer-reasoning";
 import { toClaimOnChain } from "./shared/types";
-import { maxAgeForCategory } from "./shared/evidence-freshness";
-import { validateEvidenceIntegrity } from "./shared/evidence-integrity";
+import { maxAgeForCategory, validateEvidenceIntegrity } from "./shared/evidence-freshness";
 import type {
   ClaimOnChain,
   PersonaRunnerContext,
@@ -97,66 +96,14 @@ const PEER_READ_DELAY_MS   = Number(process.env.COUNCIL_PEER_READ_DELAY_MS ?? 15
 const PEER_READ_CAP_USDC   = Number(process.env.COUNCIL_PEER_READ_CAP_USDC ?? "0.003");
 const CONTRACT_ID          = requireMarketContractId();
 
-// ── Cross-cycle evidence cache ────────────────────────────────────────────────
 /**
- * Module-level evidence cache that survives across poll cycles so we don't
- * refetch the same resolution URL every cycle. Entries are keyed by
- * `claimId:url` and carry a `fetchedAt` timestamp; entries younger than
- * `maxAgeForCategory(category)` are reused, older ones are refetched.
- *
- * Bounded to EVIDENCE_CACHE_MAX_ENTRIES to keep memory in check; when full we
- * evict the oldest entry (LRU-ish via insertion order). Entries for claims
- * that are no longer joinable are evicted at the start of each cycle.
+ * Module-level evidence cache, persisted across poll cycles so a claim
+ * evaluated in consecutive cycles within its freshness window triggers
+ * only one fetch. Keyed by `${claimId}:${url}`. Bounded by
+ * EVIDENCE_CACHE_MAX_ENTRIES to keep memory in check.
  */
 const EVIDENCE_CACHE_MAX_ENTRIES = Number(process.env.COUNCIL_EVIDENCE_CACHE_MAX ?? 500);
-const evidenceCache = new Map<string, EvidenceCacheEntry>();
-
-function evidenceCacheKey(claimId: number, url: string): string {
-  return `${claimId}:${url}`;
-}
-
-/** Drop entries for claims that are no longer joinable. */
-function evictNonJoinableClaims(joinableIds: Set<number>): void {
-  for (const key of evidenceCache.keys()) {
-    const claimId = Number(key.slice(0, key.indexOf(":")));
-    if (!joinableIds.has(claimId)) {
-      evidenceCache.delete(key);
-    }
-  }
-}
-
-/** Enforce the entry cap by dropping the oldest inserted entries. */
-function enforceEvidenceCacheCap(): void {
-  while (evidenceCache.size > EVIDENCE_CACHE_MAX_ENTRIES) {
-    const oldest = evidenceCache.keys().next().value;
-    if (oldest === undefined) break;
-    evidenceCache.delete(oldest);
-  }
-}
-
-/**
- * Return a fresh, integrity-validated cache entry for (claimId, url, category),
- * or undefined if absent/stale/corrupt so the caller refetches.
- */
-function getFreshEvidence(
-  claimId: number,
-  url: string,
-  category: string,
-  now: number,
-): EvidenceCacheEntry | undefined {
-  const entry = evidenceCache.get(evidenceCacheKey(claimId, url));
-  if (!entry) return undefined;
-  const maxAge = maxAgeForCategory(category);
-  if (now - entry.fetchedAt > maxAge) {
-    evidenceCache.delete(evidenceCacheKey(claimId, url));
-    return undefined;
-  }
-  if (!validateEvidenceIntegrity(entry)) {
-    evidenceCache.delete(evidenceCacheKey(claimId, url));
-    return undefined;
-  }
-  return entry;
-}
+const persistentEvidenceCache = new Map<string, EvidenceCacheEntry>();
 
 // ── Env guard ─────────────────────────────────────────────────────────────────
 requireAnyLLMKey();
@@ -235,6 +182,72 @@ async function fetchClaim(claimId: number): Promise<ClaimOnChain | null> {
   return claim ? toClaimOnChain(claim) : null;
 }
 
+/**
+ * Build the per-cycle evidence cache view backed by the module-level
+ * persistent cache. Entries younger than `maxAgeForCategory(category)`
+ * are reused; stale or corrupt entries are dropped so the runner refetches.
+ *
+ * Evicts entries for claims that are no longer joinable (not in
+ * `joinableClaimIds`) and enforces the entry cap.
+ */
+export function buildEvidenceCache(
+  joinableClaimIds: Set<number>,
+  now: number,
+  persistent: Map<string, EvidenceCacheEntry> = persistentEvidenceCache,
+  maxEntries: number = EVIDENCE_CACHE_MAX_ENTRIES,
+): Map<number, EvidenceCacheEntry> {
+  // Evict entries for claims that are no longer joinable.
+  for (const key of persistent.keys()) {
+    const claimId = Number(key.split(":")[0]);
+    if (!joinableClaimIds.has(claimId)) {
+      persistent.delete(key);
+    }
+  }
+
+  // Drop stale or invalid entries so the runner refetches them.
+  for (const [key, entry] of persistent) {
+    const ageSec = now - entry.fetchedAt;
+    const maxAge = maxAgeForCategory(entry.category);
+    if (!Number.isFinite(ageSec) || ageSec >= maxAge || !validateEvidenceIntegrity(entry)) {
+      persistent.delete(key);
+    }
+  }
+
+  // Enforce the entry cap by dropping the oldest entries.
+  if (persistent.size > maxEntries) {
+    const sorted = [...persistent.entries()].sort(
+      (a, b) => a[1].fetchedAt - b[1].fetchedAt,
+    );
+    const excess = persistent.size - maxEntries;
+    for (let i = 0; i < excess; i += 1) {
+      persistent.delete(sorted[i][0]);
+    }
+  }
+
+  // Per-cycle view: claimId -> entry. The runner writes back through
+  // `ctx.evidenceCache`; we mirror those writes into the persistent map
+  // after the cycle (see poll()).
+  const view = new Map<number, EvidenceCacheEntry>();
+  for (const [key, entry] of persistent) {
+    const claimId = Number(key.split(":")[0]);
+    view.set(claimId, entry);
+  }
+  return view;
+}
+
+/**
+ * Pure helper: pick claims that are still joinable at `now`.
+ *
+ * Extracted so the selection rule can be unit-tested without touching the
+ * chain. A claim is joinable when its state is `open` or `active` and its
+ * deadline has not yet passed.
+ */
+export function selectJoinableClaims(claims: ClaimOnChain[], now: number): ClaimOnChain[] {
+  return claims.filter(
+    (claim) => (claim.state === "open" || claim.state === "active") && claim.deadline > now,
+  );
+}
+
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 async function poll(): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
@@ -258,8 +271,6 @@ async function poll(): Promise<void> {
     `\n[council] ── Poll at ${new Date().toISOString()} ── ${total} claims, ${ACTIVE_PERSONAS.length} personas`,
   );
 
-  // Shared cross-cycle evidence cache — one HTTP fetch per claim no matter
-  // how many personas need it, reused across cycles while fresh.
   const peerReasoning = new Map<string, string[]>();
   const ctx: PersonaRunnerContext = {
     contractId: CONTRACT_ID,
@@ -268,21 +279,27 @@ async function poll(): Promise<void> {
   };
 
   // Pre-load joinable claims so we don't refetch in the inner loop.
-  const allClaims: ClaimOnChain[] = [];
-  for (let id = 1; id <= total; id++) {
-    const claim = await fetchClaim(id);
-    if (!claim) continue;
-    const joinable = (claim.state === "open" || claim.state === "active") && claim.deadline > now;
-    if (joinable) allClaims.push(claim);
+  // Batched read: one RPC simulation per BATCH_SIZE ids instead of one per id,
+  // so the per-poll cost drops from `total` to `ceil(total / BATCH_SIZE)`.
+  const fetched: ClaimOnChain[] = [];
+  if (total > 0) {
+    const rawClaims = await readClaimsBatch(1, total);
+    for (const raw of rawClaims) {
+      if (!raw) continue;
+      fetched.push(toClaimOnChain(raw));
+    }
   }
-  // Drop cached evidence for claims that are no longer joinable so memory
-  // tracks only live claims.
-  evictNonJoinableClaims(new Set(allClaims.map((c) => c.id)));
-  enforceEvidenceCacheCap();
+  const allClaims = selectJoinableClaims(fetched, now);
   if (allClaims.length === 0) {
     console.log("[council] No joinable claims this round.");
     return;
   }
+
+  // Shared evidence cache — persisted across cycles, filtered for freshness,
+  // and evicted for claims that are no longer joinable.
+  const joinableClaimIds = new Set(allClaims.map((c) => c.id));
+  const evidenceCache = buildEvidenceCache(joinableClaimIds, now);
+  ctx.evidenceCache = evidenceCache;
 
   // Focus on claims closest to settling — they're the most interesting for
   // the council to weigh in on and keeps LLM-call volume bounded.
@@ -344,6 +361,14 @@ async function poll(): Promise<void> {
     }
   }
 
+  // Mirror per-cycle cache writes back into the persistent map so the next
+  // cycle can reuse them. The runner keys entries by claim id; we store them
+  // under `${claimId}:${url}` to match the persistent key format.
+  for (const [claimId, entry] of evidenceCache) {
+    const key = `${claimId}:${entry.url}`;
+    persistentEvidenceCache.set(key, entry);
+  }
+
   console.log(
     stakesThisCycle > 0
       ? `[council] Cycle complete — ${stakesThisCycle} new stakes submitted.`
@@ -390,8 +415,7 @@ async function main(): Promise<void> {
   const safePoll = () =>
     reportingPoll("council", "council", POLL_INTERVAL_MS / 1000, poll, { pause: "council_worker" });
 
-  await safePoll();
-  setInterval(safePoll, POLL_INTERVAL_MS);
+  await runWorkerLoop({ worker: "council", intervalMs: POLL_INTERVAL_MS, cycle: safePoll });
 }
 
 main().catch((err) => {
