@@ -18,27 +18,11 @@ import { apiError } from "@/lib/api/errors";
 import { authorizeRequest } from "@/lib/api/policy";
 import { findAnyBasketDefinition } from "@/lib/server/basket-directory";
 import { subscribeToBasket, unsubscribeFromBasket } from "@/lib/db";
+import { subscriptionMessage } from "@/lib/baskets";
+import { validateSignedWindow } from "@/lib/signed-window";
+import { consumeNonce } from "@/lib/server/nonce-store";
 
 export const dynamic = "force-dynamic";
-
-/**
- * Signed by the subscriber. States the cap in the text they actually see.
- *
- * The address is interpolated verbatim: a Stellar strkey is case-sensitive
- * base32, so the `toLowerCase()` this line used to carry — harmless for a hex
- * EVM address — would produce a string no wallet ever signed.
- */
-export function subscribeMessage(args: {
-  basketId: string; subscriber: string; perMarketUsdc: number;
-}): string {
-  return [
-    "Mimir basket subscription",
-    `basket: ${args.basketId}`,
-    `subscriber: ${args.subscriber}`,
-    `per market: ${args.perMarketUsdc} USDC`,
-    "Mimir never holds your funds. Every stake is signed by you.",
-  ].join("\n");
-}
 
 /** A mirror that can drain an account is not a feature anyone asked for. */
 const MAX_PER_MARKET_USDC = 100;
@@ -54,7 +38,10 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
     return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
   }
 
-  let body: { subscriber?: string; perMarketUsdc?: number; signature?: string; unsubscribe?: boolean };
+  let body: {
+    subscriber?: string; perMarketUsdc?: number; signature?: string; unsubscribe?: boolean;
+    nonce?: string; expiresAt?: number;
+  };
   try {
     body = await req.json();
   } catch {
@@ -62,7 +49,7 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
     return NextResponse.json(err.body, { status: err.status });
   }
 
-  // Trimmed, never lowercased — see subscribeMessage above.
+  // Trimmed, never lowercased — see subscriptionMessage in lib/baskets.
   const subscriber = String(body.subscriber ?? "").trim();
   if (!isStellarAccount(subscriber)) {
     const err = apiError("invalid_request", "subscriber must be a Stellar account address");
@@ -86,16 +73,31 @@ export async function POST(req: NextRequest, context: { params: Promise<{ id: st
     const err = apiError("invalid_signature", "subscriber signature is required");
     return NextResponse.json(err.body, { status: err.status });
   }
+  const window = validateSignedWindow(body.nonce, body.expiresAt);
+  if (!window.ok) {
+    const err = apiError(window.code, window.message, { field: window.field });
+    return NextResponse.json(err.body, { status: err.status });
+  }
+  const action = body.unsubscribe ? "unsubscribe" : "subscribe";
   // Ed25519 verification takes the public key as an INPUT — unlike EIP-191, there
   // is no recovery step and therefore no "recovered a different address" branch
   // to get wrong. The address checked is the one the row will be written under.
   const valid = verifyStellarSignedMessage({
     address: subscriber,
-    message: subscribeMessage({ basketId: id, subscriber, perMarketUsdc }),
+    message: subscriptionMessage({
+      action, basketId: id, subscriber, perMarketUsdc,
+      nonce: window.nonce, expiresAt: window.expiresAt,
+    }),
     signature,
   });
   if (!valid) {
     const err = apiError("invalid_signature", "signature rejected");
+    return NextResponse.json(err.body, { status: err.status });
+  }
+
+  // Consumed after verification so a forged request cannot burn a real nonce.
+  if (!(await consumeNonce(`basket-subscription:${subscriber}`, `basket-subscription:${window.nonce}`))) {
+    const err = apiError("conflict", "nonce already used; sign a fresh authorisation");
     return NextResponse.json(err.body, { status: err.status });
   }
 

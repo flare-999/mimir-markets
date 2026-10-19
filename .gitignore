@@ -39,11 +39,17 @@ traction-wallets.env
 # ========================
 # Testing & coverage
 # ========================
+.cache/node-tests/
 coverage/
+coverage/node/
 .nyc_output/
 *.lcov
 __pycache__/
 *.pyc
+
+# Browser smoke suite artifacts (playwright.config.ts writes these)
+test-results/
+playwright-report/
 
 # ========================
 # Logs
@@ -104,3 +110,8 @@ mimir-logo-preview.png
 branch_structure.json
 temp_auto_push.bat
 temp_interactive_push.bat
+# Generated release SBOM (published via Actions, not committed)
+sbom/
+# Local npm audit evidence (uploaded by Actions, not committed)
+npm-audit.json
+npm-audit-report.md

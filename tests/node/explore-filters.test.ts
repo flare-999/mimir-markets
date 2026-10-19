@@ -116,6 +116,7 @@ test("explore filter URL serialization round-trips new flags", () => {
     expiringSoon: true,
     participation: "joined",
     underdogOnly: true,
+    view: "closed",
   });
 
   const parsed = parseExploreSearchParams(new URLSearchParams(serialized));
@@ -129,5 +130,6 @@ test("explore filter URL serialization round-trips new flags", () => {
     expiringSoon: true,
     participation: "joined",
     underdogOnly: true,
+    view: "closed",
   });
 });

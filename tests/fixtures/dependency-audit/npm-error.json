@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "ENOAUDIT",
+    "summary": "Your configured registry does not support audit requests.",
+    "detail": "See `npm help audit` for more detail."
+  }
+}

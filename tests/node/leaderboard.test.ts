@@ -66,9 +66,9 @@ test("an exact tie breaks on address, not on insertion order", () => {
   assert.deepEqual(board.ranked.map((e) => e.address), ["0xaa", "0xbb"]);
 });
 
-test("addresses are lower-cased so a checksum variant is not a second actor", () => {
-  const board = buildLeaderboard([actor("0xAABB", ["win", "win", "win"])]);
-  assert.equal(board.ranked[0].address, "0xaabb");
+test("addresses are kept verbatim: Stellar strkeys are case-sensitive", () => {
+  const board = buildLeaderboard([actor("GAABB", ["win", "win", "win"])]);
+  assert.equal(board.ranked[0].address, "GAABB");
 });
 
 // ── Refunds ───────────────────────────────────────────────────────────────────

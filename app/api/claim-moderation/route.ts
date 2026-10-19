@@ -1,18 +1,9 @@
-import { NextResponse } from "next/server";
-
-import { createApiError } from "@/lib/server/api-validation";
+import { authorizeRequest } from "@/lib/api/rate-limit";
 import {
   moderateClaim,
   type ClaimModerationInput,
 } from "@/lib/server/claim-moderation";
 import { handleClaimModerationPost } from "@/lib/server/claim-moderation-route-handler";
-import {
-  getGlobalCooldownMs,
-  hashModerationInput,
-  moderationInFlight,
-  moderationResultCache,
-  setGlobalCooldownMs,
-} from "@/lib/server/moderation-cache";
 
 export const dynamic = "force-dynamic";
 
@@ -58,6 +49,10 @@ function parseInput(value: unknown): ClaimModerationInput | null {
 }
 
 export async function POST(request: Request) {
+  const authorization = authorizeRequest("claim_moderation", request);
+  if (!authorization.ok) {
+    return authorization.response;
+  }
+
   return handleClaimModerationPost({ request, moderateClaim });
 }
-

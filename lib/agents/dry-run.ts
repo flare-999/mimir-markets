@@ -1,4 +1,4 @@
-/**
+/*
  * Pre-flight for a funded agent action: would the policy allow it, does the agent
  * have the money, and what would it actually be paid?
  *

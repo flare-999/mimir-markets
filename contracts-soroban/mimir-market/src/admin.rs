@@ -5,7 +5,7 @@ use soroban_sdk::{Address, Env};
 use crate::escrow;
 use crate::events;
 use crate::storage;
-use crate::types::{Error, FeePolicy, PendingFeePolicy, FEE_TIMELOCK_SECONDS, MAX_TOTAL_FEE_BPS};
+use crate::types::{Error, FeePolicy, PendingFeePolicy, PendingOracle, FEE_TIMELOCK_SECONDS, MAX_TOTAL_FEE_BPS, ORACLE_TIMELOCK_SECONDS};
 
 fn require_owner(env: &Env) -> Result<(), Error> {
     storage::owner(env)?.require_auth();
@@ -77,12 +77,54 @@ pub fn initialize(
     Ok(())
 }
 
-pub fn set_oracle(env: &Env, new_oracle: Address) -> Result<(), Error> {
+/// Queue an oracle rotation. It cannot execute until the timelock elapses, so
+/// participants have notice before settlement authority moves.
+pub fn queue_oracle(env: &Env, new_oracle: Address) -> Result<(), Error> {
     require_owner(env)?;
-    let previous = storage::oracle(env)?;
-    storage::set_oracle(env, &new_oracle);
-    events::OracleChanged {
+    let executable_at = env
+        .ledger()
+        .timestamp()
+        .checked_add(ORACLE_TIMELOCK_SECONDS)
+        .ok_or(Error::Overflow)?;
+
+    storage::set_pending_oracle(
+        env,
+        &PendingOracle {
+            next: new_oracle.clone(),
+            executable_at,
+        },
+    );
+    events::OracleQueued {
         next: new_oracle,
+        executable_at,
+    }
+    .publish(env);
+    Ok(())
+}
+
+pub fn cancel_oracle(env: &Env) -> Result<(), Error> {
+    require_owner(env)?;
+    if storage::pending_oracle(env).is_none() {
+        return Err(Error::NothingQueued);
+    }
+    storage::clear_pending_oracle(env);
+    events::OracleCancelled { cancelled: true }.publish(env);
+    Ok(())
+}
+
+/// Execute a queued oracle rotation. Permissionless once the timelock has
+/// elapsed: the change was already public, and requiring the owner again would
+/// let a lost key strand the queue forever.
+pub fn execute_oracle(env: &Env) -> Result<(), Error> {
+    let queued = storage::pending_oracle(env).ok_or(Error::NothingQueued)?;
+    if env.ledger().timestamp() < queued.executable_at {
+        return Err(Error::Timelocked);
+    }
+    let previous = storage::oracle(env)?;
+    storage::set_oracle(env, &queued.next);
+    storage::clear_pending_oracle(env);
+    events::OracleChanged {
+        next: queued.next,
         previous: Some(previous),
     }
     .publish(env);

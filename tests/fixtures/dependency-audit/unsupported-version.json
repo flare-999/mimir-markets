@@ -1,0 +1,9 @@
+{
+  "auditReportVersion": 1,
+  "advisories": {
+    "123": {
+      "module_name": "left-pad",
+      "severity": "high"
+    }
+  }
+}

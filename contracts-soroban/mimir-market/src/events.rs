@@ -24,6 +24,24 @@ pub struct ClaimChallenged {
     pub stake: i128,
 }
 
+/// A fixed-odds challenge consumed part of the creator's liquidity guarantee.
+/// `reserved_creator_liability` and `available_creator_liquidity` are snapshots
+/// after this challenge, so an indexer can audit the limit without replaying
+/// the roster or trusting a stale read-index calculation.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixedOddsLiquidityReserved {
+    #[topic]
+    pub id: u64,
+    #[topic]
+    pub challenger: Address,
+    pub stake: i128,
+    pub gross: i128,
+    pub profit: i128,
+    pub reserved_creator_liability: i128,
+    pub available_creator_liquidity: i128,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimResolved {
@@ -35,11 +53,55 @@ pub struct ClaimResolved {
     pub evidence_hash: BytesN<32>,
 }
 
+/// The versioned verdict written at resolution, emitted alongside
+/// `ClaimResolved`.
+///
+/// `ClaimResolved` keeps its existing shape for compatible indexers; this event
+/// carries the explicit encoding version so consumers can pin the verdict
+/// encoding without a second read or a schema guess.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VerdictEncoded {
+    #[topic]
+    pub id: u64,
+    pub version: u32,
+    pub winner_side: WinnerSide,
+}
+
+/// The creator's refund of an unchallenged claim. `refund` lets an indexer
+/// reconcile the refund against `creator_stake` and escrow without a second
+/// read; `parked` distinguishes a delivered refund from one parked as a
+/// withdrawable balance when the creator's trustline refused the transfer.
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClaimCancelled {
     #[topic]
     pub id: u64,
+    pub refund: i128,
+    pub parked: bool,
+}
+
+/// Defensive halt: the claim's accounting shows counterparty funds or a
+/// reserved creator liability while its lifecycle state claims to be `Open`.
+/// The cancellation was refused and NOTHING changed — this event is the
+/// on-chain record for keepers, indexers and incident response.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancellationRefused {
+    #[topic]
+    pub id: u64,
+    pub challenger_count: u32,
+    pub total_challenger_stake: i128,
+    pub reserved_creator_liability: i128,
+    pub reason: u32,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleQueued {
+    #[topic]
+    pub next: Address,
+    pub executable_at: u64,
 }
 
 #[contractevent]
@@ -48,6 +110,12 @@ pub struct OracleChanged {
     #[topic]
     pub next: Address,
     pub previous: Option<Address>,
+}
+
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OracleCancelled {
+    pub cancelled: bool,
 }
 
 #[contractevent]
@@ -106,6 +174,20 @@ pub struct AgentAttributed {
     pub agent_owner_recipient: Address,
 }
 
+/// Frozen fee terms written onto a claim at creation. Indexers can treat this as
+/// the authoritative economics for the market; a later `FeePolicyUpdated` must
+/// not rewrite them.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FeePolicySnapshotted {
+    #[topic]
+    pub id: u64,
+    pub platform_fee_bps: u32,
+    pub agent_owner_fee_bps: u32,
+    pub platform_recipient: Option<Address>,
+    pub agent_owner_recipient: Option<Address>,
+}
+
 #[contractevent]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeeAccrued {
@@ -151,4 +233,53 @@ pub struct ChallengerPaid {
     pub gross: i128,
     pub fee: i128,
     pub net: i128,
+}
+
+/// Lifecycle state transition event for auditing and monitoring.
+/// Emitted on every state change with the previous and new states.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClaimStateTransitioned {
+    #[topic]
+    pub id: u64,
+    pub from_state: u32,
+    pub to_state: u32,
+    pub timestamp: u64,
+}
+
+/// Emitted when a claim's deadline is reached and it transitions to settlement-eligible.
+/// Useful for indexers and workers to identify claims ready for oracle resolution.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeadlineReached {
+    #[topic]
+    pub id: u64,
+    pub deadline: u64,
+    pub challenger_count: u32,
+    pub total_staked: i128,
+}
+
+/// Emitted when initial escrow is established for a claim.
+/// Records the initial funding state for accounting reconciliation.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EscrowSeeded {
+    #[topic]
+    pub id: u64,
+    #[topic]
+    pub funder: Address,
+    pub amount: i128,
+    pub escrow_type: String,
+}
+
+/// Emitted on fixed-odds liquidity state changes beyond reservations.
+/// Tracks available creator liquidity for risk management.
+#[contractevent]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LiquidityUpdated {
+    #[topic]
+    pub id: u64,
+    pub reserved_liability: i128,
+    pub available_liquidity: i128,
+    pub total_creator_stake: i128,
 }

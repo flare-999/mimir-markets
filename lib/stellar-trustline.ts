@@ -84,6 +84,42 @@ export interface TrustlineState {
   balance: number | null;
 }
 
+export interface HorizonBalanceLine {
+  asset_type: string;
+  asset_code?: string;
+  asset_issuer?: string;
+  balance: string;
+  limit?: string;
+  buying_liabilities?: string;
+  selling_liabilities?: string;
+  last_modified_ledger?: number;
+  is_authorized?: boolean;
+  is_authorized_to_maintain_liabilities?: boolean;
+  is_clawback_enabled?: boolean;
+  liquidity_pool_id?: string;
+  sponsor?: string;
+}
+
+export interface HorizonAccount {
+  balances: readonly HorizonBalanceLine[];
+}
+
+export type HorizonAccountLoader = (address: string) => Promise<HorizonAccount>;
+
+export interface ReadUsdcTrustlineOptions {
+  loadAccount?: HorizonAccountLoader;
+  server?: { loadAccount: HorizonAccountLoader };
+}
+
+function resolveAccountLoader(
+  options: HorizonAccountLoader | ReadUsdcTrustlineOptions,
+): HorizonAccountLoader {
+  if (typeof options === "function") return options;
+  if (options.loadAccount) return (address) => options.loadAccount!(address);
+  if (options.server) return (address) => options.server!.loadAccount(address);
+  return (address) => createHorizonServer().loadAccount(address);
+}
+
 /**
  * Read the USDC trustline straight from Horizon.
  *
@@ -91,10 +127,14 @@ export interface TrustlineState {
  * "no trustline", "no account" and "RPC hiccup" all into `null`, and this is the
  * one place where telling them apart is the whole point.
  */
-export async function readUsdcTrustline(address: string): Promise<TrustlineState> {
+export async function readUsdcTrustline(
+  address: string,
+  options: HorizonAccountLoader | ReadUsdcTrustlineOptions = {},
+): Promise<TrustlineState> {
   if (!isAccountAddress(address)) return { status: "unknown", balance: null };
+  const loadAccount = resolveAccountLoader(options);
   try {
-    const account = await createHorizonServer().loadAccount(address);
+    const account = await loadAccount(address);
     const line = account.balances.find(
       (balance): balance is Horizon.HorizonApi.BalanceLineAsset =>
         (balance.asset_type === "credit_alphanum4" || balance.asset_type === "credit_alphanum12") &&

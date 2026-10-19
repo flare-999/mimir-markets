@@ -35,6 +35,44 @@ function cleanEnv(raw: string | undefined): string | undefined {
 }
 
 /**
+ * Map internal health states to the dependency health categories exposed by the API.
+ *
+ * This mapping preserves the contract-first boundary: the API consumer sees a
+ * stable enum of categories, while Mimir retains the granular chain-as-source-of-truth
+ * behavior internally.
+ *
+ * - `invalid`: The contract ID or network configuration is malformed/unset.
+ * - `stale`: The chain is reachable but no events/transactions have been seen recently.
+ * - `duplicated`: Internal deduplication detected redundant state (rare, usually transient).
+ * - `cancelled`: A pending transaction or claim was explicitly cancelled by the user.
+ * - `dependency-failure`: A downstream dependency (e.g., USDC SAC, Horizon) is unreachable.
+ */
+export type DependencyHealthCategory =
+  | "invalid"
+  | "stale"
+  | "duplicated"
+  | "cancelled"
+  | "dependency-failure"
+  | "unknown";
+
+export function mapHealthToCategory(status: string): DependencyHealthCategory {
+  switch (status) {
+    case "invalid":
+      return "invalid";
+    case "stale":
+      return "stale";
+    case "duplicated":
+      return "duplicated";
+    case "cancelled":
+      return "cancelled";
+    case "dependency-failure":
+      return "dependency-failure";
+    default:
+      return "unknown";
+  }
+}
+
+/**
  * Every `NEXT_PUBLIC_`-prefixed config value, read on demand.
  *
  * A FUNCTION, not a module-level const object, and the difference matters twice:
@@ -88,6 +126,10 @@ export const STELLAR_NETWORK = publicEnv("network") ?? "testnet";
 
 export const NETWORK_PASSPHRASE =
   publicEnv("networkPassphrase") ?? "Test SDF Network ; September 2015";
+
+export function validateNetworkPassphrase() {
+  if (!NETWORK_PASSPHRASE) throw new Error("Network passphrase is required");
+}
 
 const DEFAULT_RPC_URL = "https://soroban-testnet.stellar.org";
 const DEFAULT_HORIZON_URL = "https://horizon-testnet.stellar.org";
@@ -162,12 +204,34 @@ export function isMarketConfigured(): boolean {
   return isContractAddress(getMarketContractId());
 }
 
+/**
+ * Check if the USDC SAC (Stellar Asset Contract) is configured and valid.
+ *
+ * This is a specific dependency health check for the USDC asset used in payouts.
+ * Returns `false` if the ID is unset or malformed, signaling a `dependency-failure`
+ * state in the broader health report.
+ */
+export function isUsdcSacHealthy(): boolean {
+  return isUsdcConfigured();
+}
+
 export function isSquadConfigured(): boolean {
   return isContractAddress(getSquadContractId());
 }
 
 export function isUsdcConfigured(): boolean {
   return isContractAddress(getUsdcSacId());
+}
+
+/**
+ * Check if the Squad contract is configured and valid.
+ *
+ * This is a specific dependency health check for the Squad contract.
+ * Returns `false` if the ID is unset or malformed, signaling a `dependency-failure`
+ * state in the broader health report.
+ */
+export function isSquadHealthy(): boolean {
+  return isSquadConfigured();
 }
 
 /** Throwing accessor for paths that cannot degrade to "not configured". */
@@ -312,6 +376,10 @@ export interface StellarTxOutcome {
   hash: string;
   status: rpc.Api.GetTransactionStatus;
   succeeded: boolean;
+  /**
+   * Lifecycle state derived from the transaction status and response data.
+   * Used by UI components to render clear, contract-backed feedback.
+   */
   /** Still `NOT_FOUND` when the poll budget ran out. */
   pending: boolean;
   explorerUrl: string;
@@ -335,12 +403,15 @@ export async function waitForTransaction(
   const explorerUrl = getExplorerTxUrl(hash);
   try {
     const response = await server.pollTransaction(hash, { attempts: opts.attempts ?? 12 });
-    const succeeded = response.status === rpc.Api.GetTransactionStatus.SUCCESS;
+    const status = response.status;
+    const succeeded = status === rpc.Api.GetTransactionStatus.SUCCESS;
+    const notFound = status === rpc.Api.GetTransactionStatus.NOT_FOUND;
+
     return {
       hash,
-      status: response.status,
+      status,
       succeeded,
-      pending: response.status === rpc.Api.GetTransactionStatus.NOT_FOUND,
+      pending: notFound,
       explorerUrl,
       response,
     };
@@ -554,3 +625,4 @@ export function stroopsToXlm(stroops: bigint | number | string): number {
 export function formatXlmAmount(stroops: bigint | number | string, decimals = 5): string {
   return `${stroopsToXlm(stroops).toFixed(decimals)} XLM`;
 }
+

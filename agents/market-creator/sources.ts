@@ -94,6 +94,11 @@ export async function fetchWeatherEvents(): Promise<{ text: string; events: Weat
  * Filtered to launches with a real window inside the next week: "will it launch
  * eventually" is not a market, and a slip beyond the deadline is exactly the
  * uncertainty being traded.
+ *
+ * Deduplicates by launch ID to ensure Mimir preserves funded-state safety and
+ * clear operational boundaries. If the API returns multiple entries for the same
+ * launch (e.g., status updates or historical records mixed in), only the first
+ * valid one is kept.
  */
 export async function fetchLaunchEvents(): Promise<{ text: string; events: LaunchEvent[] }> {
   const url = "https://ll.thespacedevs.com/2.2.0/launch/upcoming/?limit=8&mode=list";
@@ -104,20 +109,27 @@ export async function fetchLaunchEvents(): Promise<{ text: string; events: Launc
   const now = Date.now();
   const week = now + 7 * 86_400_000;
   const events: LaunchEvent[] = [];
+  const seenIds = new Set<string>();
 
   for (const result of data?.results ?? []) {
     const windowStartMs = Date.parse(result.net ?? "");
     if (!Number.isFinite(windowStartMs)) continue;
     if (windowStartMs <= now || windowStartMs > week) continue;
+
+    const id = String(result.id ?? "");
+    // Deduplicate by ID to prevent duplicate market creation for the same event.
+    if (seenIds.has(id)) continue;
+    seenIds.add(id);
+
     events.push({
-      id: String(result.id ?? ""),
+      id,
       name: String(result.name ?? "").slice(0, 120),
       provider: String(result.launch_service_provider?.name ?? "unknown"),
       windowStart: new Date(windowStartMs).toISOString(),
       windowStartMs,
       // One launch, so the oracle reads a single record rather than a list it has
       // to search through.
-      resolutionUrl: `https://ll.thespacedevs.com/2.2.0/launch/${result.id}/`,
+      resolutionUrl: `https://ll.thespacedevs.com/2.2.0/launch/${id}/`,
     });
   }
 

@@ -9,12 +9,14 @@ import {
   type DashboardFilterUrlState,
   type DashboardUrlTab,
 } from "@/lib/dashboardUrlState";
+import { clampDashboardPage } from "@/lib/dashboardUiPolicy";
 
 /**
- * Filtros del dashboard en cliente + URL vía `history.replaceState` (mismo criterio que Explore:
- * sin `router.replace` para evitar re-fetch de RSC).
+ * Dashboard filters in client + URL via `history.replaceState` (same approach as Explore:
+ * without `router.replace` to avoid RSC re-fetch).
  *
- * - Navegación con URL completa / atrás-adelante: `useSearchParams` o `popstate` alinean estado.
+ * - Full URL navigation / back-forward: `useSearchParams` or `popstate` align state.
+ * - Page (`page`) is 1-based and clamped to the valid range when writing the URL.
  */
 export function useDashboardFilterUrlState() {
   const searchParams = useSearchParams();
@@ -39,7 +41,8 @@ export function useDashboardFilterUrlState() {
   const setTab = useCallback(
     (tab: DashboardUrlTab) => {
       setState((prev) => {
-        const next = { ...prev, tab };
+        // Tab switch resets the page to avoid losing rows in the new set.
+        const next = { ...prev, tab, page: 1 };
         commitUrl(next);
         return next;
       });
@@ -50,7 +53,7 @@ export function useDashboardFilterUrlState() {
   const setSearchQuery = useCallback(
     (search: string) => {
       setState((prev) => {
-        const next = { ...prev, search };
+        const next = { ...prev, search, page: 1 };
         commitUrl(next);
         return next;
       });
@@ -61,7 +64,7 @@ export function useDashboardFilterUrlState() {
   const setCategoryFilter = useCallback(
     (cat: string) => {
       setState((prev) => {
-        const next = { ...prev, cat };
+        const next = { ...prev, cat, page: 1 };
         commitUrl(next);
         return next;
       });
@@ -72,9 +75,27 @@ export function useDashboardFilterUrlState() {
   const setMinStakeFilter = useCallback(
     (minStake: number) => {
       setState((prev) => {
-        const next = { ...prev, minStake };
+        const next = { ...prev, minStake, page: 1 };
         commitUrl(next);
         return next;
+      });
+    },
+    [commitUrl]
+  );
+
+  /**
+   * Updates list page. Accepts number or reducer function so callers
+   * can step prev/next without knowing current state.
+   */
+  const setPage = useCallback(
+    (next: number | ((prev: number) => number)) => {
+      setState((prev) => {
+        const raw = typeof next === "function" ? next(prev.page) : next;
+        const page = clampDashboardPage(raw);
+        if (page === prev.page) return prev;
+        const updated = { ...prev, page };
+        commitUrl(updated);
+        return updated;
       });
     },
     [commitUrl]
@@ -110,6 +131,8 @@ export function useDashboardFilterUrlState() {
     setCategoryFilter,
     minStakeFilter: state.minStake,
     setMinStakeFilter,
+    page: state.page,
+    setPage,
     resetFilters,
   };
 }

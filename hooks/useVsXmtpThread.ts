@@ -1,11 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  ConsentState,
-  type DecodedMessage,
-  type Dm,
-} from "@xmtp/browser-sdk";
+import type { DecodedMessage, Dm } from "@xmtp/browser-sdk";
 import type { XmtpClientInstance } from "@/lib/xmtp/types";
 import {
   classifyXmtpThreadError,
@@ -13,6 +9,17 @@ import {
   loadThreadMessages,
   type XmtpThreadErrorKind,
 } from "@/lib/xmtp/chat-thread";
+import {
+  classifyXmtpFailureKind,
+  nextXMtpFailure,
+  type XmtpFailure,
+} from "@/lib/xmtp/failure-state";
+import {
+  loadReadState,
+  markThreadRead,
+  saveReadState,
+  type ReadStateMap,
+} from "@/lib/xmtp/read-state";
 
 const VISIBILITY_REFRESH_MIN_MS = 4000;
 
@@ -25,9 +32,9 @@ export type VsXmtpThreadError = {
 };
 
 export type UseVsXmtpThreadOptions = {
-  /** Wallet + VS elegible + peer conocido; no exige XMTP listo. */
+  /** Wallet + VS eligible + peer conocido; no exige XMTP listo. */
   threadEligible: boolean;
-  /** Cliente listo (solo con `xmtpStatus === "ready"`). */
+  /** Cliente listo (solo con `xmtpStatus === "ready"). */
   client: XmtpClientInstance | null;
   peerAddress: string;
 };
@@ -37,17 +44,26 @@ export type UseVsXmtpThreadResult = {
   dm: Dm | null;
   messages: DecodedMessage[];
   threadError: VsXmtpThreadError | null;
+  /** El mismo fallo de apertura, ya clasificado para copy y reintento. */
+  threadFailure: XmtpFailure | null;
+  /**
+   * Fallo del stream con el hilo ya abierto. No destruye hilo: los mensajes ya
+   * cargados siguen visibles, pero pueden estar desactualizados hasta que se
+   * reabra la conversación. Antes esto solo llegaba a `console.warn` el panel
+   * seguía mostrando un hilo congelado sin ngun aviso.
+   */
+  streamFailure: XmtpFailure | null;
   isRefreshing: boolean;
   /** Sincroniza lista global + hilo y vuelve a cargar mensajes. */
   refreshThread: () => Promise<void>;
-  /** Reinicia apertura del hilo (p. ej. tras error). */
+  /** Reinicia apertura del hilo (p. ej: tras error). */
   retryOpenThread: () => void;
   clearThreadError: () => void;
 };
 
 /**
  * Ciclo de vida del DM 1v1 VS: sync/consent (Paso 6), stream en vivo,
- * refresco al volver a la pestaña (throttle) y refresco manual.
+ * refresco al volver a la pestaña (throttle) e y refresco manual.
  */
 export function useVsXmtpThread({
   threadEligible,
@@ -69,6 +85,15 @@ export function useVsXmtpThread({
   const [threadError, setThreadError] = useState<VsXmtpThreadError | null>(
     null
   );
+  /**
+   * El mismo fallo de apertura, ya clasificado en la taxonomía que la UI pinta.
+   * `threadError` se conserva porque la maqueta de demo 1v1 decide con
+   * `kind === "peer_unreachable"`, y ese kind histórico no es 1:1 con
+   * `XmtpFailureKind` (p. ej: `network` de `classifyXmtpThreadError` se desglosa
+   * en `network` o `timeout`).
+   */
+  const [threadFailure, setThreadFailure] = useState<XmtpFailure | null>(null);
+  const [streamFailure, setStreamFailure] = useState<XmtpFailure | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   /** Incrementar para forzar re-ejecución del efecto de apertura tras error. */
   const [openRetryNonce, setOpenRetryNonce] = useState(0);
@@ -79,6 +104,23 @@ export function useVsXmtpThread({
   const peerRef = useRef(peerAddress);
   const lastVisibilityRefreshAt = useRef(0);
   const wasHiddenRef = useRef(false);
+  const readStateRef = useRef<ReadStateMap | null>(null);
+
+  /**
+   * Marca el hilo como leído siempre que hay un hilo abierto y mensajes vistos.
+   * La ayuda de estado pura debe degradar silenciosamente si `safeStorage`
+   * falla (SSR, cuota, modo privado, etc.).
+   */
+  const markCurrentThreadRead = useCallback(() => {
+    const id = dmRef.current?.id;
+    if (!id) return;
+    const current = readStateRef.current ?? loadReadState();
+    const next = markThreadRead(current, id, Date.now());
+    readStateRef.current = next;
+    if (next !== current) {
+      saveReadState(next);
+    }
+  }, []);
 
   useEffect(() => {
     dmRef.current = dm;
@@ -92,10 +134,35 @@ export function useVsXmtpThread({
     peerRef.current = peerAddress;
   }, [peerAddress]);
 
-  const clearThreadError = useCallback(() => setThreadError(null), []);
+  const clearThreadError = useCallback(() => {
+    setThreadError(null);
+    setThreadFailure(null);
+  }, []);
+
+  /**
+   * Registra un fallo de apertura/refresh en las dos formas que consume la UI: la
+   * taxonomía histórica (`kind`, que decide la maqueta de demo) y la de fallo
+   * (copy + política de reintento). Se registramos aquí, junto al error, para que
+   * las dos no puedan derivar a categorías distintas del mismo fallo.
+   */
+  const recordThreadError = useCallback(
+    (kind: XmtpThreadErrorKind, technical: string, cause?: unknown) => {
+      setThreadError({ kind, technical });
+      setThreadFailure((prev) =>
+        nextXMtpFailure(
+          prev,
+          classifyXmtpFailureKind(cause ??  technical),
+          technical
+        )
+      );
+    },
+    []
+  );
 
   const retryOpenThread = useCallback(() => {
     setThreadError(null);
+    setThreadFailure(null);
+    setStreamFailure(null);
     setPhase("idle");
     setDm(null);
     setMessages([]);
@@ -111,20 +178,26 @@ export function useVsXmtpThread({
     setIsRefreshing(true);
     clearThreadError();
     try {
+      const { ConsentState } = await import("@xmtp/browser-sdk");
       await c.conversations.syncAll([ConsentState.Allowed]);
       await d.sync();
       const next = await loadThreadMessages(d);
       setMessages(next);
+      // A fresh that lands proves the transport is alive again, so the
+      // "messages may be stale" notice from a dead stream no longer applies.
+      setStreamFailure(null);
+      // Viewing the thread counts as reading it.
+      markCurrentThreadRead();
     } catch (e) {
-      const { kind, message } = classifyXmtpThreadError(e);
+      const { kind, message } = classifyXMtpThreadError(e);
       if (isNonFatalSyncNotice(message)) {
         return;
       }
-      setThreadError({ kind, technical: message });
+      recordThreadError(kind, message, e);
     } finally {
       setIsRefreshing(false);
     }
-  }, [clearThreadError, isNonFatalSyncNotice]);
+  }, [clearThreadError, isNonFatalSyncNotice, markCurrentThreadRead, recordThreadError]);
 
   const throttledVisibilityRefresh = useCallback(() => {
     const now = Date.now();
@@ -141,13 +214,15 @@ export function useVsXmtpThread({
       setPhase("idle");
       setDm(null);
       setMessages([]);
-      setThreadError(null);
+      clearThreadError();
+      setStreamFailure(null);
       return;
     }
 
     const myGen = ++initGen.current;
     setPhase("loading");
-    setThreadError(null);
+    clearThreadError();
+    setStreamFailure(null);
 
     let streamEnd: (() => Promise<unknown>) | null = null;
     let cancelled = false;
@@ -165,19 +240,34 @@ export function useVsXmtpThread({
         setDm(opened);
         setMessages(initial);
         setPhase("ready");
+        // Opening a thread counts as reading it.
+        markThreadRead(opened.id, Date.now());
 
         const stream = await opened.stream({
           onValue: (msg) => {
             if (myGen !== initGen.current) return;
+            // A live value after a stream error is proof the stream recovered.
+            setStreamFailure((prev) => (prev === null ? prev : null));
             setMessages((prev) => {
               if (prev.some((p) => p.id === msg.id)) return prev;
               return [...prev, msg].sort(
                 (a, b) => a.sentAt.getTime() - b.sentAt.getTime()
               );
             });
+            // A message viewed in the open thread counts as read.
+            markThreadRead(opened.id, Date.now());
           },
           onError: (err) => {
-            console.warn("[useVsXmtpThread] stream", err);
+            if (myGen !== initGen.current) return;
+            // Non-destructive: the thread stays open and readable, but it is now
+            // potentially stale and the UI must say so instead of going silent.
+            setStreamFailure((prev) =>
+              nextXmtpFailure(
+                prev,
+                "stream_lost",
+                err instanceof Error ? err.message : String(err)
+              )
+            );
           },
         });
         streamEnd = () => stream.end();
@@ -186,13 +276,14 @@ export function useVsXmtpThread({
         const { kind, message } = classifyXmtpThreadError(e);
         if (isNonFatalSyncNotice(message)) {
           setPhase("idle");
-          setThreadError(null);
+          clearThreadError();
           return;
         }
-        setThreadError({ kind, technical: message });
+        recordThreadError(kind, message, e);
         setPhase("error");
         setDm(null);
         setMessages([]);
+        setStreamFailure(null);
       }
     })();
 
@@ -202,8 +293,10 @@ export function useVsXmtpThread({
       void streamEnd?.();
       setDm(null);
       setMessages([]);
+      setThreadFailure(null);
+      setStreamFailure(null);
     };
-  }, [threadEligible, client, peerAddress, openRetryNonce]);
+  }, [threadEligible, client, peerAddress, openRetryNonce, clearThreadError, recordThreadError]);
 
   /**
    * Safety net: if the open flow gets stuck without throwing (SDK/worker edge cases),
@@ -216,13 +309,14 @@ export function useVsXmtpThread({
     const id = window.setTimeout(() => {
       // Only trip if we're still on the same init generation and still loading.
       if (initGen.current !== myGen) return;
-      setThreadError({ kind: "network", technical: "XMTP_OPEN_TIMEOUT" });
+      recordThreadError("network", "XMTP_OPEN_TIMEOUT");
       setPhase("error");
       setDm(null);
       setMessages([]);
+      setStreamFailure(null);
     }, 25_000);
     return () => window.clearTimeout(id);
-  }, [threadEligible, phase]);
+  }, [threadEligible, phase, recordThreadError]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -251,6 +345,8 @@ export function useVsXmtpThread({
     dm,
     messages,
     threadError,
+    threadFailure,
+    streamFailure,
     isRefreshing,
     refreshThread,
     retryOpenThread,

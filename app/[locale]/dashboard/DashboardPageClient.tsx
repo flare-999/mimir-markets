@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { motion } from "framer-motion";
-import { useLocale, useTranslations } from "next-intl";
+import { useTranslations } from "next-intl";
 import { Link } from "@/i18n/navigation";
 import { useWallet } from "@/lib/wallet";
 import {
@@ -12,7 +12,6 @@ import {
   getVSUserWinAmount,
   type VSData,
 } from "@/lib/contract";
-import { formatDashboardSnapshotAge } from "@/lib/dashboardSnapshotAge";
 import type { VSCacheFreshness } from "@/lib/vs-freshness";
 import { mergePendingVS } from "@/lib/pending-vs";
 import { applyExploreFilters } from "@/lib/exploreFilters";
@@ -26,7 +25,10 @@ import DashboardPortfolioSection, {
 import DashboardWalletGate from "@/components/dashboard/DashboardWalletGate";
 import AccountBalances from "@/components/wallet/AccountBalances";
 import DashboardKpiSkeletonRow from "@/components/dashboard/DashboardKpiSkeletonRow";
+import PortfolioPerformancePanel from "@/components/dashboard/PortfolioPerformancePanel";
 import DashboardVSFilterBar from "@/components/dashboard/DashboardVSFilterBar";
+import CacheFreshnessPill from "@/components/CacheFreshnessPill";
+import StaleIndexWarning from "@/components/StaleIndexWarning";
 import { useDashboardFilterUrlState } from "@/hooks/useDashboardFilterUrlState";
 import {
   DASHBOARD_CARD_HOVER,
@@ -46,6 +48,9 @@ const filterPillActive = "border-pv-emerald/50 bg-pv-emerald text-pv-bg";
 
 const listItemEase = [0.25, 0.1, 0.25, 1] as const;
 
+/** Page size for the dashboard positions list. Kept small so first paint is fast. */
+const DASHBOARD_POSITIONS_PAGE_SIZE = 10;
+
 export default function DashboardPageClient() {
   const { address, isConnected, isConnecting, connect } = useWallet();
   const [duels, setDuels] = useState<VSData[]>([]);
@@ -55,6 +60,7 @@ export default function DashboardPageClient() {
     null
   );
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
   const {
     tab,
     setTab,
@@ -68,8 +74,6 @@ export default function DashboardPageClient() {
   } = useDashboardFilterUrlState();
   const requestIdRef = useRef(0);
   const t = useTranslations("dashboard");
-  const tCache = useTranslations("cache");
-  const locale = useLocale();
 
   const loadDuels = useCallback(
     async ({
@@ -147,14 +151,39 @@ export default function DashboardPageClient() {
         // The dashboard shows the user's own positions; underdog is a discovery
         // filter for the explorer, not a lens on markets you are already in.
         underdogOnly: false,
+        // `view` only drives the explorer tabs; the dashboard tab filter above
+        // already decided which states are shown.
+        view: "open",
       }),
     [tabFiltered, categoryFilter, minStakeFilter, searchQuery]
   );
+
+  const totalPages = Math.max(
+    1,
+    Math.ceil(filtered.length / DASHBOARD_POSITIONS_PAGE_SIZE)
+  );
+  const safePage = Math.min(page, totalPages);
+  const paginated = useMemo(() => {
+    const start = (safePage - 1) * DASHBOARD_POSITIONS_PAGE_SIZE;
+    return filtered.slice(start, start + DASHBOARD_POSITIONS_PAGE_SIZE);
+  }, [filtered, safePage]);
+
+  // Clamp the page if the result set shrinks below the current page (e.g. a
+  // position resolves and drops out of the active tab).
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [page, totalPages]);
 
   const exposureFilterKey = useMemo(
     () => `${tab}-${searchQuery}-${categoryFilter}-${minStakeFilter}`,
     [tab, searchQuery, categoryFilter, minStakeFilter]
   );
+
+  // Reset to page 1 whenever the filter inputs change so the user never lands
+  // on an out-of-range page after narrowing the result set.
+  useEffect(() => {
+    setPage(1);
+  }, [exposureFilterKey]);
 
   const showStakeHoldingsMocks = useMemo(
     () => shouldShowDashboardStakeHoldingsMocks(duels),
@@ -237,30 +266,7 @@ export default function DashboardPageClient() {
               </span>
             </div>
             {snapshotCache && !loadError ? (
-              <span
-                className={`max-w-[11rem] truncate font-mono text-[9px] font-semibold uppercase tracking-[0.14em] sm:max-w-none sm:text-[10px] ${
-                  snapshotCache.status === "live"
-                    ? "text-pv-emerald/90"
-                    : snapshotCache.status === "stale"
-                      ? "text-amber-400/90"
-                      : "text-pv-muted"
-                }`}
-                title={tCache("label")}
-                aria-label={t("listFreshnessAria")}
-              >
-                {tCache(snapshotCache.status)}
-                {snapshotCache.ageMs != null ? (
-                  <>
-                    {" "}
-                    · {formatDashboardSnapshotAge(snapshotCache.ageMs, locale)}
-                  </>
-                ) : (
-                  <>
-                    {" "}
-                    · {tCache("unknown")}
-                  </>
-                )}
-              </span>
+              <CacheFreshnessPill freshness={snapshotCache} />
             ) : null}
             <Link
               href="/vs/create"
@@ -271,6 +277,12 @@ export default function DashboardPageClient() {
           </div>
         </div>
       </AnimatedItem>
+
+      <StaleIndexWarning
+        freshness={snapshotCache}
+        refreshing={refreshing}
+        onRefresh={() => void loadDuels({ forceRefresh: true })}
+      />
 
       {loadError ? (
         <AnimatedItem>
@@ -414,6 +426,12 @@ export default function DashboardPageClient() {
         </AnimatedItem>
       ) : null}
 
+      {address ? (
+        <AnimatedItem>
+          <PortfolioPerformancePanel address={address} />
+        </AnimatedItem>
+      ) : null}
+
       {/* The wallet/account area. `withdraw()` and `claimFees()` are pull-only on
           Soroban, so this is the only place either can be called from — a parked
           payment with no entry point is stranded money, not a missing nicety. */}
@@ -431,7 +449,7 @@ export default function DashboardPageClient() {
 
       <AnimatedItem>
         <DashboardPortfolioSection
-          filteredVsList={filtered}
+          filteredVsList={paginated}
           showStakeHoldingsMocks={showStakeHoldingsMocks}
           exposureFilterKey={exposureFilterKey}
           onResetFilters={resetFilters}
@@ -457,6 +475,10 @@ export default function DashboardPageClient() {
               onRefresh={() => {
                 void loadDuels({ forceRefresh: true });
               }}
+              page={safePage}
+              pageCount={totalPages}
+              onPageChange={setPage}
+              totalCount={filtered.length}
             />
           }
         />

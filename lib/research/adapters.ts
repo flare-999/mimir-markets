@@ -1,6 +1,19 @@
 import { gatewayFetch, type FetchResult, type GatewayFetchArgs } from "./gateway";
+import {
+  validateResearchContent,
+  type ContentValidationOpts,
+  type ContentValidationResult,
+} from "./content-validation";
 
-export type ResearchCapability = "official_web" | "rss" | "github_public_metadata" | "sports_results" | "weather_observations" | "market_data" | "release_calendar" | "x402_bazaar";
+export type ResearchCapability =
+  | "official_web"
+  | "rss"
+  | "github_public_metadata"
+  | "sports_results"
+  | "weather_observations"
+  | "market_data"
+  | "release_calendar"
+  | "x402_bazaar";
 export type TrustTier = "primary" | "trusted" | "discovered";
 
 export interface ResearchAdapterManifest {
@@ -31,9 +44,86 @@ export function researchAdapter(id: string): ResearchAdapterManifest | null {
   return BY_ID.get(id.trim().toLowerCase()) ?? null;
 }
 
-export async function fetchWithAdapter(adapterId: string, args: GatewayFetchArgs): Promise<FetchResult | { ok: false; kind: "adapter"; detail: string }> {
+// ── Adapter fetch result ──────────────────────────────────────────────────────
+
+/** A successful fetch that has also passed content validation. */
+export type AdapterSuccess = FetchResult & {
+  ok: true;
+  validation: ContentValidationResult;
+};
+
+/** A fetch failure originating in the adapter layer (unknown/discovered adapter). */
+export type AdapterFailure = { ok: false; kind: "adapter"; detail: string };
+
+/** A fetch failure originating in the gateway layer. */
+export type GatewayFailure = FetchResult & { ok: false };
+
+/** A fetch failure originating in the content-validation layer. */
+export type ValidationFailure = {
+  ok: false;
+  kind: "validation";
+  detail: string;
+  validation: ContentValidationResult;
+};
+
+export type AdapterFetchResult =
+  | AdapterSuccess
+  | AdapterFailure
+  | GatewayFailure
+  | ValidationFailure;
+
+// ── Adapter-level fetch with content validation ───────────────────────────────
+
+/**
+ * Fetch a source through the named adapter, then validate the content.
+ *
+ * Callers that only care about success/failure can treat this like the previous
+ * `FetchResult | AdapterFailure` union. Callers that want to inspect the
+ * validation result (freshness, duplication, privacy findings) can narrow on
+ * `result.ok === true` and read `result.validation`.
+ *
+ * The `validationOpts.maxAgeSeconds` default comes from the adapter's own
+ * `freshnessSeconds`, so callers get the right freshness window automatically.
+ */
+export async function fetchWithAdapter(
+  adapterId: string,
+  args: GatewayFetchArgs,
+  validationOpts?: ContentValidationOpts,
+): Promise<AdapterFetchResult> {
   const adapter = researchAdapter(adapterId);
-  if (!adapter) return { ok: false, kind: "adapter", detail: `unknown adapter '${adapterId}'` };
-  if (adapter.trustTier === "discovered") return { ok: false, kind: "adapter", detail: "discovered endpoints require x402 admission and payment authorization" };
-  return gatewayFetch(args);
+  if (!adapter) {
+    return { ok: false, kind: "adapter", detail: `unknown adapter '${adapterId}'` };
+  }
+  if (adapter.trustTier === "discovered") {
+    return {
+      ok: false,
+      kind: "adapter",
+      detail: "discovered endpoints require x402 admission and payment authorization",
+    };
+  }
+
+  const gwResult = await gatewayFetch(args);
+  if (!gwResult.ok) {
+    // Gateway failure: pass through without validation.
+    return gwResult as GatewayFailure;
+  }
+
+  // Merge the adapter's freshness window into the validation options so callers
+  // get the correct staleness threshold without having to look it up themselves.
+  const opts: ContentValidationOpts = {
+    maxAgeSeconds: adapter.freshnessSeconds,
+    ...validationOpts,
+  };
+  const validation = validateResearchContent(gwResult, opts);
+
+  if (!validation.usable) {
+    return {
+      ok: false,
+      kind: "validation",
+      detail: validation.reason,
+      validation,
+    };
+  }
+
+  return { ...gwResult, validation };
 }

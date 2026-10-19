@@ -58,6 +58,7 @@ import {
   supportsMessageSigning,
   type ShapedWallet,
 } from "./wallet-connectors";
+import { walletRowLabel } from "./wallet-aria";
 
 /** Remembering the last wallet turns a five-row decision into one tap on return. */
 const RECENT_WALLET_KEY = "mimir-recent-wallet";
@@ -102,6 +103,7 @@ let kitPromise: Promise<Kit> | null = null;
  */
 async function loadKit(): Promise<Kit> {
   if (kitPromise) return kitPromise;
+
   kitPromise = (async () => {
     const [
       { StellarWalletsKit },
@@ -123,8 +125,8 @@ async function loadKit(): Promise<Kit> {
     // does with the value is forward it as `networkPassphrase` when signing. So
     // the app's configured passphrase is passed straight through rather than
     // mapped from a network name — which also means a standalone or quickstart
-    // network works without the enum having a member for it. The cast is why the
-    // enum is not imported at runtime at all.
+    // network works without the enum having a member for it. The cast is why
+    // the enum is not imported at runtime at all.
     const network = NETWORK_PASSPHRASE as NonNullable<
       Parameters<typeof StellarWalletsKit.init>[0]["network"]
     >;
@@ -140,8 +142,10 @@ async function loadKit(): Promise<Kit> {
       network,
       authModal: { hideUnsupportedWallets: false },
     });
+
     return StellarWalletsKit;
   })();
+
   return kitPromise;
 }
 
@@ -154,12 +158,19 @@ async function loadKit(): Promise<Kit> {
  */
 function toWalletError(cause: unknown, action: string): Error {
   if (cause instanceof Error) return cause;
+
   if (cause && typeof cause === "object") {
-    const kitError = cause as { code?: number; message?: string; ext?: string };
+    const kitError = cause as {
+      code?: number;
+      message?: string;
+      ext?: string;
+    };
+
     if (typeof kitError.message === "string" && kitError.message) {
       return new Error(kitError.message);
     }
   }
+
   return new Error(`Could not ${action}.`);
 }
 
@@ -184,12 +195,14 @@ export interface WalletContextValue {
    * `SignTransaction` so it can be handed to a generated `Client` as-is.
    */
   signTransaction: SignTransaction;
+
   /**
    * SEP-43 auth-entry signing. Only needed to co-sign an invocation somebody else
    * submits; Mimir's own writes are invoker-authorised. Throws a clear message on
    * wallets that do not implement it.
    */
   signAuthEntry: SignAuthEntry;
+
   /** Off-chain attestation signing. Returns the base64 signature. */
   signMessage: (message: string) => Promise<string>;
 
@@ -202,12 +215,22 @@ export interface WalletContextValue {
 
   /** Product name of the connected wallet, e.g. "Freighter". */
   walletName: string | null;
+
   /** The connected wallet cannot sign off-chain messages (Albedo). */
   canSignMessages: boolean;
+
   /** The connected wallet cannot co-sign auth entries. */
   canSignAuthEntries: boolean;
+
   /** Set when the wallet reports a different network than Mimir submits to. */
   networkWarning: string | null;
+
+  /**
+   * Transaction lifecycle state for the most recent user-initiated action.
+   * Used by confirmation polling and feedback UI to show loading, invalid,
+   * stale, disconnected, or dependency-failure states.
+   */
+  transactionState: TransactionState | null;
 
   /** Rows for the picker modal, already ordered. */
   wallets: ModalWallet[];
@@ -218,21 +241,26 @@ type ModalWallet = ShapedWallet & { connect: () => void };
 const NO_WALLET = "Connect a Stellar wallet first.";
 
 const Ctx = createContext<WalletContextValue>({
+  transactionState: null,
   address: null,
   isConnected: false,
   isConnecting: false,
   connect: async () => {},
   disconnect: () => {},
   error: null,
+
   signTransaction: async () => {
     throw new Error(NO_WALLET);
   },
+
   signAuthEntry: async () => {
     throw new Error(NO_WALLET);
   },
+
   signMessage: async () => {
     throw new Error(NO_WALLET);
   },
+
   signer: null,
   walletName: null,
   canSignMessages: false,
@@ -240,6 +268,25 @@ const Ctx = createContext<WalletContextValue>({
   networkWarning: null,
   wallets: [],
 });
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Lifecycle states for wallet-initiated transactions.
+ *
+ * - `null`: No active transaction feedback.
+ * - `"loading"`: Transaction submitted, awaiting confirmation or failure.
+ * - `"invalid"`: Transaction structure or signature failed validation before submission.
+ * - `"stale"`: Transaction confirmed on-chain but the wallet session lost sync (e.g. reconnect).
+ * - `"disconnected"`: Wallet disconnected during a pending transaction.
+ * - `"dependency-failure"`: A required upstream step (e.g. trustline) failed.
+ */
+export type TransactionState =
+  | "loading"
+  | "invalid"
+  | "stale"
+  | "disconnected"
+  | "dependency-failure";
 
 // ── Modal ─────────────────────────────────────────────────────────────────────
 
@@ -249,9 +296,15 @@ function WalletMark({ wallet }: { wallet: ModalWallet }) {
       // Kit-supplied data URI / CDN mark; next/image would only put a loader in
       // front of it, and the kit already ships these at the size we render.
       // eslint-disable-next-line @next/next/no-img-element
-      <img src={wallet.icon} alt="" aria-hidden className="h-7 w-7 shrink-0 rounded-md" />
+      <img
+        src={wallet.icon}
+        alt=""
+        aria-hidden
+        className="h-7 w-7 shrink-0 rounded-md"
+      />
     );
   }
+
   return (
     <span
       aria-hidden
@@ -284,14 +337,21 @@ function WalletRow({
   const body = (
     <>
       <WalletMark wallet={wallet} />
+
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium text-pv-text">{labelFor(wallet)}</span>
+          <span className="truncate text-sm font-medium text-pv-text">
+            {labelFor(wallet)}
+          </span>
         </span>
+
         {subtitle && (
-          <span className="mt-0.5 block truncate text-[11px] text-pv-muted">{subtitle}</span>
+          <span className="mt-0.5 block truncate text-[11px] text-pv-muted">
+            {subtitle}
+          </span>
         )}
       </span>
+
       {badge && (
         <span className="shrink-0 font-mono text-[9px] uppercase tracking-wider text-pv-muted">
           {badge}
@@ -305,14 +365,26 @@ function WalletRow({
   // how "the connect button is broken" reports happen.
   if (installUrl) {
     return (
-      <a href={installUrl} target="_blank" rel="noreferrer" className={shell}>
+      <a
+        href={installUrl}
+        target="_blank"
+        rel="noreferrer"
+        className={shell}
+        aria-label={walletRowLabel(labelFor(wallet), { installed: false, recent: wallet.recent, wrapper: wallet.wrapper })}
+      >
         {body}
       </a>
     );
   }
 
   return (
-    <button type="button" disabled={isPending} onClick={wallet.connect} className={shell}>
+    <button
+      type="button"
+      disabled={isPending}
+      onClick={wallet.connect}
+      aria-label={walletRowLabel(labelFor(wallet), { installed: wallet.installed, recent: wallet.recent, wrapper: wallet.wrapper })}
+      className={shell}
+    >
       {body}
     </button>
   );
@@ -339,11 +411,14 @@ function WalletPickerModal({
   // traps anyone on a keyboard.
   useEffect(() => {
     if (!open) return;
+
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
+
     window.addEventListener("keydown", onKey);
     dialogRef.current?.focus();
+
     return () => window.removeEventListener("keydown", onKey);
   }, [open, onClose]);
 
@@ -369,30 +444,59 @@ function WalletPickerModal({
         className="w-full max-w-sm border border-pv-border/40 bg-pv-bg p-5 shadow-2xl outline-none"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* sr-only live region announces connection status changes without
+            requiring focus, so Freighter users hear "Connecting to Freighter"
+            as soon as they click a row rather than waiting for the button to
+            re-render under focus. */}
+        <div aria-live="polite" aria-atomic="true" className="sr-only">
+          {isPending
+            ? "Connecting to wallet — please check your wallet extension"
+            : error === "rejected"
+              ? "Connection rejected in wallet"
+              : error
+                ? "Could not connect. Try another wallet."
+                : ""}
+        </div>
+
         <div className="mb-1 flex items-center justify-between">
-          <h2 className="font-display text-lg font-bold text-pv-text">Connect wallet</h2>
+          <h2 className="font-display text-lg font-bold text-pv-text">
+            Connect wallet
+          </h2>
+
           <button
             type="button"
             onClick={onClose}
             className="px-2 py-1 text-sm text-pv-muted transition-colors hover:text-pv-text"
-            aria-label="Close"
+            aria-label="Close connect wallet dialog"
           >
             ✕
           </button>
         </div>
+
         <p className="mb-4 font-mono text-[11px] uppercase tracking-wider text-pv-muted">
           Stellar · {STELLAR_NETWORK}
         </p>
 
         <div className="space-y-2">
           {loading && wallets.length === 0 && (
-            <p className="text-sm text-pv-muted">Looking for wallets…</p>
+            <p className="text-sm text-pv-muted" role="status" aria-live="polite">Looking for wallets…</p>
           )}
 
-          {primary && <WalletRow wallet={primary} isPending={isPending} featured />}
+          {primary && (
+            <WalletRow
+              wallet={primary}
+              isPending={isPending}
+              featured
+            />
+          )}
 
           {ready.map((wallet) => (
-            <WalletRow key={wallet.id} wallet={wallet} isPending={isPending} featured={false} />
+            <WalletRow
+              key={wallet.id}
+              wallet={wallet}
+              isPending={isPending}
+              featured={false}
+            />
           ))}
 
           {notInstalled.length > 0 && (
@@ -400,6 +504,7 @@ function WalletPickerModal({
               <summary className="cursor-pointer list-none border border-pv-ink/[0.12] px-4 py-2.5 text-center font-mono text-[11px] uppercase tracking-wider text-pv-muted transition-colors hover:border-pv-ink/[0.25] hover:text-pv-text">
                 Don&apos;t have one? ({notInstalled.length})
               </summary>
+
               <div className="mt-2 space-y-2">
                 {notInstalled.map((wallet) => (
                   <WalletRow
@@ -415,7 +520,7 @@ function WalletPickerModal({
         </div>
 
         {error && (
-          <p className="mt-3 text-xs text-pv-danger">
+          <p role="alert" className="mt-3 text-xs text-pv-danger">
             {error === "rejected"
               ? "Connection rejected in wallet."
               : "Could not connect. Try another wallet."}
@@ -435,6 +540,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [networkWarning, setNetworkWarning] = useState<string | null>(null);
+  // Exposed through the context for lifecycle feedback UI; nothing in the
+  // provider drives it yet, so it stays `null` until a write flow sets it.
+  const [transactionState] = useState<TransactionState | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerLoading, setPickerLoading] = useState(false);
   const [options, setOptions] = useState<ShapedWallet[]>([]);
@@ -456,11 +564,15 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
    */
   useEffect(() => {
     let cancelled = false;
+
     (async () => {
       const remembered = readRecentWallet();
+
       if (!cancelled) setRecentId(remembered);
+
       try {
         const kit = await loadKit();
+
         if (remembered) {
           try {
             kit.setWallet(remembered);
@@ -468,8 +580,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
             // The remembered wallet is no longer one of our modules.
           }
         }
+
         const { address: restored } = await kit.getAddress();
+
         if (cancelled || !restored) return;
+
         setAddress(restored);
         setWalletId(kit.selectedModule.productId);
         setWalletName(kit.selectedModule.productName);
@@ -477,6 +592,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         // No persisted session, or nothing selected. Stay disconnected.
       }
     })();
+
     return () => {
       cancelled = true;
     };
@@ -495,12 +611,16 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       setNetworkWarning(null);
       return;
     }
+
     let cancelled = false;
+
     (async () => {
       try {
         const kit = await loadKit();
         const { networkPassphrase } = await kit.getNetwork();
+
         if (cancelled || !networkPassphrase) return;
+
         setNetworkWarning(
           networkPassphrase === NETWORK_PASSPHRASE
             ? null
@@ -510,6 +630,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
         if (!cancelled) setNetworkWarning(null);
       }
     })();
+
     return () => {
       cancelled = true;
     };
@@ -517,63 +638,105 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   // ── Signing ────────────────────────────────────────────────────────────────
 
-  const signTransaction = useCallback<SignTransaction>(async (xdr, opts) => {
-    // SEP-43 has an optional "sign and submit for me" mode that the SDK's
-    // SignTransaction type exposes and the kit's per-module `signTransaction`
-    // does not implement — it would silently drop the flag and hand back an
-    // unsubmitted envelope, which reads as "the transaction vanished". Mimir
-    // always submits through Soroban RPC itself, so nothing sets this today;
-    // refusing it keeps a future caller from finding out the hard way.
-    if (opts?.submit) {
-      throw new Error(
-        "This wallet layer does not sign-and-submit; submit the signed transaction through Soroban RPC.",
-      );
-    }
-    const kit = await loadKit();
-    const signerAddress = opts?.address ?? addressRef.current ?? undefined;
-    try {
-      const signed = await kit.signTransaction(xdr, {
-        networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
-        ...(signerAddress ? { address: signerAddress } : {}),
-      });
-      return { signedTxXdr: signed.signedTxXdr, signerAddress: signed.signerAddress };
-    } catch (cause) {
-      const err = toWalletError(cause, "sign this transaction");
-      // A wallet pointed at the wrong network signs over the wrong passphrase and
-      // reports it as a generic failure. Say what to check, rather than surfacing
-      // "Error: -3" and letting the user guess.
-      if (/network|passphrase/i.test(err.message)) {
+  const signTransaction = useCallback<SignTransaction>(
+    async (xdr, opts) => {
+      // Do not attempt to load or invoke the wallet provider after the
+      // application has lost its connected wallet state.
+      if (!addressRef.current) {
+        throw new Error(NO_WALLET);
+      }
+
+      // SEP-43 has an optional "sign and submit for me" mode that the SDK's
+      // SignTransaction type exposes and the kit's per-module `signTransaction`
+      // does not implement — it would silently drop the flag and hand back an
+      // unsubmitted envelope, which reads as "the transaction vanished". Mimir
+      // always submits through Soroban RPC itself, so nothing sets this today;
+      // refusing it keeps a future caller from finding out the hard way.
+      if (opts?.submit) {
         throw new Error(
-          `${err.message} — check that your wallet is set to Stellar ${STELLAR_NETWORK}.`,
+          "This wallet layer does not sign-and-submit; submit the signed transaction through Soroban RPC.",
         );
       }
-      throw err;
-    }
-  }, []);
 
-  const signAuthEntry = useCallback<SignAuthEntry>(async (authEntry, opts) => {
-    const kit = await loadKit();
-    const signerAddress = opts?.address ?? addressRef.current ?? undefined;
-    try {
-      const signed = await kit.signAuthEntry(authEntry, {
-        networkPassphrase: opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
-        ...(signerAddress ? { address: signerAddress } : {}),
-      });
-      return { signedAuthEntry: signed.signedAuthEntry, signerAddress: signed.signerAddress };
-    } catch (cause) {
-      throw toWalletError(cause, "sign this authorization");
-    }
-  }, []);
+      const kit = await loadKit();
+      const signerAddress = opts?.address ?? addressRef.current ?? undefined;
+
+      try {
+        const signed = await kit.signTransaction(xdr, {
+          networkPassphrase:
+            opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
+          ...(signerAddress ? { address: signerAddress } : {}),
+        });
+
+        return {
+          signedTxXdr: signed.signedTxXdr,
+          signerAddress: signed.signerAddress,
+        };
+      } catch (cause) {
+        const err = toWalletError(cause, "sign this transaction");
+
+        if (/network|passphrase/i.test(err.message)) {
+          throw new Error(
+            `${err.message} — check that your wallet is set to Stellar ${STELLAR_NETWORK}.`,
+          );
+        }
+
+        throw err;
+      }
+    },
+    [],
+  );
+
+  const signAuthEntry = useCallback<SignAuthEntry>(
+    async (authEntry, opts) => {
+      // An auth-entry signature must never proceed after the wallet has
+      // disconnected or the provider state has been cleared.
+      if (!addressRef.current) {
+        throw new Error(NO_WALLET);
+      }
+
+      const kit = await loadKit();
+      const signerAddress =
+        opts?.address ?? addressRef.current ?? undefined;
+
+      try {
+        const signed = await kit.signAuthEntry(authEntry, {
+          networkPassphrase:
+            opts?.networkPassphrase ?? NETWORK_PASSPHRASE,
+          ...(signerAddress ? { address: signerAddress } : {}),
+        });
+
+        return {
+          signedAuthEntry: signed.signedAuthEntry,
+          signerAddress: signed.signerAddress,
+        };
+      } catch (cause) {
+        throw toWalletError(cause, "sign this authorization");
+      }
+    },
+    [],
+  );
 
   const signMessage = useCallback(async (message: string) => {
+    // Off-chain signatures are still wallet actions and must not use a stale
+    // address after disconnect.
+    if (!addressRef.current) {
+      throw new Error(NO_WALLET);
+    }
+
     const kit = await loadKit();
-    const signerAddress = addressRef.current ?? undefined;
+    const signerAddress = addressRef.current;
+
     try {
       const signed = await kit.signMessage(message, {
         networkPassphrase: NETWORK_PASSPHRASE,
-        ...(signerAddress ? { address: signerAddress } : {}),
+        address: signerAddress,
       });
-      if (!signed.signedMessage) throw new Error("The wallet returned no signature.");
+
+      if (!signed.signedMessage) {
+        throw new Error("The wallet returned no signature.");
+      }
+
       return signed.signedMessage;
     } catch (cause) {
       throw toWalletError(cause, "sign this message");
@@ -590,10 +753,13 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
    */
   const signer = useMemo<StellarSigner | null>(() => {
     if (!address) return null;
+
     return {
       publicKey: address,
       signTransaction,
-      ...(supportsAuthEntrySigning(walletId) ? { signAuthEntry } : {}),
+      ...(supportsAuthEntrySigning(walletId)
+        ? { signAuthEntry }
+        : {}),
     };
   }, [address, walletId, signTransaction, signAuthEntry]);
 
@@ -601,9 +767,11 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const refreshOptions = useCallback(async () => {
     setPickerLoading(true);
+
     try {
       const kit = await loadKit();
       const supported = await kit.refreshSupportedWallets();
+
       setOptions(
         shapeWalletOptions(
           supported.map((wallet) => ({
@@ -630,15 +798,20 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     async (id: string) => {
       setIsConnecting(true);
       setError(null);
+
       try {
         const kit = await loadKit();
+
         kit.setWallet(id);
+
         // `fetchAddress`, not `getAddress`: this is the one place the extension
         // should be asked, because this is the click that asked for it.
         const { address: connected } = await kit.fetchAddress();
+
         setAddress(connected);
         setWalletId(kit.selectedModule.productId);
         setWalletName(kit.selectedModule.productName);
+
         rememberWallet(id);
         setRecentId(id);
         setPickerOpen(false);
@@ -659,12 +832,18 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, [refreshOptions]);
 
   const disconnect = useCallback(() => {
+    // Clear the ref synchronously before doing any asynchronous kit work.
+    // The signing callbacks read this ref directly, so this prevents a stale
+    // wallet address from being used during the disconnect transition.
+    addressRef.current = null;
+
     setAddress(null);
     setWalletId(null);
     setWalletName(null);
     setNetworkWarning(null);
-    // The recent-wallet hint deliberately survives: it is what makes coming back
-    // one tap. Only the session is cleared.
+
+    // The recent-wallet hint deliberately survives: it is what makes coming
+    // back one tap. Only the session is cleared.
     void loadKit()
       .then((kit) => kit.disconnect())
       .catch(() => undefined);
@@ -696,6 +875,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       canSignMessages: supportsMessageSigning(walletId),
       canSignAuthEntries: supportsAuthEntrySigning(walletId),
       networkWarning,
+      transactionState,
       wallets,
     }),
     [
@@ -711,6 +891,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       walletName,
       walletId,
       networkWarning,
+      transactionState,
       wallets,
     ],
   );
@@ -718,6 +899,7 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   return (
     <Ctx.Provider value={value}>
       {children}
+
       <WalletPickerModal
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}

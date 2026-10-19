@@ -13,28 +13,207 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  verify:
+  # What changed? Fail-closed allowlist: a path is either a known scope or the
+  # job fails. Unknown paths never silently shrink what CI runs — see
+  # scripts/ci/changed-paths.mjs and lib/ci/path-scope.ts.
+  paths:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 5
+    outputs:
+      tiers_json: ${{ steps.paths.outputs.tiers_json }}
+      unknown: ${{ steps.paths.outputs.unknown }}
     steps:
       - uses: actions/checkout@v4
         with:
-          # This job only reads the tree — it never pushes. Leaving the token in
-          # .git/config lets any later step (or an uploaded artifact) carry a
-          # credential that nothing here needs.
+          # merge-base needs real history; a shallow clone would make the path
+          # job fail closed on every run.
+          fetch-depth: 0
+          persist-credentials: false
+      - id: paths
+        # Exits 1 on an undecidable change set (after emitting the all-tier
+        # fallback) — that is the fail-closed signal, surfaced by the next step.
+        continue-on-error: true
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          args=""
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            args="--base $BEFORE"
+          fi
+          node scripts/ci/changed-paths.mjs $args
+      - name: surface an undecidable change set
+        run: |
+          if [ "${{ steps.paths.outcome }}" != "success" ]; then
+            echo "::error::changed-paths could not determine the change set (see the step log above). The suites below run ALL tiers as the fail-closed fallback — do not merge until the trigger context is fixed."
+            exit 1
+          fi
+          echo "resolved change set; tiers_json=${{ steps.paths.outputs.tiers_json }} unknown=${{ steps.paths.outputs.unknown }}"
+
+  # Tier suites. The union of all tiers equals the old single verify job; a
+  # tier runs only when a path in its scope changed (or when the change set was
+  # undecidable, in which case every tier runs).
+  suites:
+    needs: paths
+    if: ${{ !cancelled() && needs.paths.outputs.tiers_json != '' && needs.paths.outputs.tiers_json != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: ${{ fromJSON(needs.paths.outputs.tiers_json) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
           persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32v1-none
       - run: npm ci
-      - run: npm audit --omit=dev --audit-level=high
+      - name: Verify lockfile reproducibility
+        run: git diff --exit-code package-lock.json
+      # Production dependency triage (docs/DEPENDENCY_AUDIT.md): npm audit only
+      # collects; the checker decides and fails closed on high/critical/unknown.
+      - name: Audit production dependencies
+        if: matrix.tier != 'contracts'
+        run: |
+          set -uo pipefail
+          npm audit --omit=dev --json > npm-audit.json || true
+          node --import tsx scripts/check-npm-audit.ts --json npm-audit.json --out npm-audit-report.md
+      - name: Upload dependency audit evidence
+        if: always() && matrix.tier != 'contracts'
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-${{ matrix.tier }}-${{ github.run_id }}
+          path: |
+            npm-audit.json
+            npm-audit-report.md
+          if-no-files-found: ignore
+          retention-days: 14
+      - run: npm run check:terms
+      - run: npm run check:toolchains
+      - run: npm run check:schema-snapshot
+      - run: npm run typecheck
+      # The published agent API contract must be what the live code serves. Fails
+      # if docs/openapi-agent-v1.yaml or schemas/agent-api-v1.schema.json drift;
+      # run `npm run check:openapi -- --write` and commit the result.
+      - run: npm run check:openapi
+      - run: npm run verify:cache-backup -- tests/fixtures/cache-backup/valid.json
+      # Release readiness: the offline half of the checklist (docs/RELEASE_READINESS.md).
+      # No secrets, no .env, no network — reproducible from a clean checkout.
+      - run: npm run verify:release-readiness
+      - run: npm run test:smoke
+      - name: test:coverage
+        run: npm run test:coverage
+        env:
+          # Any non-empty value — no production secret required.
+          # paid-pass.ts tests need PASS_SECRET; the in-memory fallback
+          # means DATABASE_URL is not needed.
+          PASS_SECRET: mimir-ci-coverage-test
+      - run: npm run build
+
+  # Contract tests and wasm builds across the toolchains the contracts support.
+  # `npm run check:toolchains` (above) fails the PR if these entries drift from
+  # rust-toolchain.toml or the rust-version in contracts-soroban/Cargo.toml.
+  # See docs/CONTRACT_TOOLCHAINS.md.
+  contracts:
+    name: contracts (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # Each entry answers a different question; one failing must not hide the others.
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest supported rustc: rust-version in contracts-soroban/Cargo.toml.
+          - name: msrv
+            toolchain: "1.91.0"
+          # The toolchain deployed wasm is built with: rust-toolchain.toml.
+          - name: release
+            toolchain: "1.98.1"
+          # Early warning for the next rustc; bump the release pin deliberately.
+          - name: stable
+            toolchain: stable
+    env:
+      # Overrides rust-toolchain.toml so each entry really builds with its own rustc.
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: wasm32v1-none
+      - run: rustc --version --verbose
+      # --locked: build exactly the committed Cargo.lock, never a re-resolved one.
+      - run: cargo test --manifest-path contracts-soroban/Cargo.toml --release --locked
+      - run: cargo build --manifest-path contracts-soroban/Cargo.toml --release --target wasm32v1-none --locked
+      - name: wasm hashes
+        run: |
+          {
+            echo "### wasm sha256 (${{ matrix.name }}, $(rustc --version))"
+            echo '```'
+            sha256sum contracts-soroban/target/wasm32v1-none/release/*.wasm
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+      # Provenance pins in deploy/contract-artifacts.manifest.json describe the
+      # release toolchain's output: rustc's version is inside the wasm metadata,
+      # so msrv and stable builds could never match a pin, by design.
+      - if: matrix.name == 'release'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - if: matrix.name == 'release'
+        run: npm ci
+      - if: matrix.name == 'release'
+        run: npm run verify:artifacts -- --require-built
+      # Only the release build is what `npm run deploy:contract` would ship; keep
+      # it so a reviewer can compare hashes without building locally.
+      - if: matrix.name == 'release'
+        uses: actions/upload-artifact@v4
+        with:
+          name: contract-wasm-release
+          path: contracts-soroban/target/wasm32v1-none/release/*.wasm
+          if-no-files-found: error
+          retention-days: 14
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # The smoke flow builds/serves the app with a strict secret-free env and
+    # drives a real browser against it (scripts/run-browser-smoke.mjs). It uses
+    # the runner's preinstalled Google Chrome (Playwright channel "chrome"); it
+    # never downloads a Playwright browser and never sees the repo's secrets.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: .cache/node-tests
+          key: node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-${{ hashFiles('package-lock.json') }}-${{ hashFiles('scripts/run-node-tests.mjs') }}
+          restore-keys: |
+            node-tests-${{ runner.os }}-${{ hashFiles('.nvmrc') }}-
+      - run: npm ci
+      - name: Verify lockfile reproducibility
+        run: git diff --exit-code package-lock.json
       - run: npm run check:terms
       - run: npm run typecheck
-      - run: npm run test:contracts
-      - run: cargo build --manifest-path contracts-soroban/Cargo.toml --release --target wasm32v1-none
-      - run: npm run test:smoke
-      - run: npm run build
+      - run: npm run test:node
+      - run: npm run smoke:browser
+        env:
+          CI: "true"
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-smoke-artifacts
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7

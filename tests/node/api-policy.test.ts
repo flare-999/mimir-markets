@@ -189,7 +189,7 @@ test("a blank idempotency key does not count", () => {
 test("a value-moving call with a key passes", () => {
   const result = authorizeRequest(
     "authenticated_user",
-    ctx({ wallet: "0xabc", mutatesValue: true, idempotencyKey: "op-1" }),
+    ctx({ wallet: "0xabc", mutatesValue: true, idempotencyKey: "op-1", originValid: true }),
     LOOSE,
   );
   assert.equal(result.allowed, true);

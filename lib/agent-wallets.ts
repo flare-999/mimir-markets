@@ -96,9 +96,18 @@ function normalizeSecret(raw: string | undefined, envVar: string): string {
 }
 
 /** Build a wallet from an explicit secret-seed env var. */
-export function loadAgentWallet(envVar: string): AgentWallet {
+export function loadAgentWallet(
+  envVar: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+): AgentWallet {
   const name = secretEnvName(envVar);
-  const keypair = Keypair.fromSecret(normalizeSecret(process.env[name], name));
+  const secret = normalizeSecret(env[name], name);
+  let keypair: Keypair;
+  try {
+    keypair = Keypair.fromSecret(secret);
+  } catch {
+    throw new Error(`${name} must be a Stellar secret seed (S… , 56 chars)`);
+  }
   return walletFromKeypair(keypair);
 }
 
@@ -115,12 +124,16 @@ export function walletFromKeypair(keypair: Keypair): AgentWallet {
   };
 }
 
-export function getOracleWallet(): AgentWallet {
-  return loadAgentWallet("ORACLE_SECRET");
+export function getOracleWallet(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+): AgentWallet {
+  return loadAgentWallet("ORACLE_SECRET", env);
 }
 
-export function getCreatorWallet(): AgentWallet {
-  return loadAgentWallet("CREATOR_SECRET");
+export function getCreatorWallet(
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+): AgentWallet {
+  return loadAgentWallet("CREATOR_SECRET", env);
 }
 
 export function councilEnvSlug(slug: string): string {
@@ -135,13 +148,19 @@ export function councilPublicEnv(slug: string): string {
   return `COUNCIL_${councilEnvSlug(slug)}_PUBLIC`;
 }
 
-export function getCouncilWallet(slug: string): AgentWallet {
-  return loadAgentWallet(councilSecretEnv(slug));
+export function getCouncilWallet(
+  slug: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+): AgentWallet {
+  return loadAgentWallet(councilSecretEnv(slug), env);
 }
 
 /** Public key of a persona without touching its seed (web-server safe). */
-export function getCouncilAddress(slug: string): string | undefined {
-  const value = process.env[councilPublicEnv(slug)]?.split(/\s+#/)[0].trim();
+export function getCouncilAddress(
+  slug: string,
+  env: NodeJS.ProcessEnv | Record<string, string | undefined> = process.env,
+): string | undefined {
+  const value = env[councilPublicEnv(slug)]?.split(/\s+#/)[0].trim();
   return value && isAccountAddress(value) ? value : undefined;
 }
 

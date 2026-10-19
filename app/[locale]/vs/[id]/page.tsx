@@ -11,6 +11,7 @@ import {
   acceptVS,
   cancelVS,
   didUserChallengeVS,
+  getClaimFees,
   getRivalryChain,
   getVS,
   getVSChallengerCount,
@@ -31,22 +32,31 @@ import {
 } from "@/lib/contract";
 import { getExplorerTxUrl, waitForTransaction } from "@/lib/stellar";
 import { buildSeriesView } from "@/lib/series-view";
-import { getPendingVS } from "@/lib/pending-vs";
 import { openPeepsAvatar } from "@/lib/avatars";
+import { useVsDetail } from "@/hooks/useVsDetail";
+import CacheFreshnessControls from "@/components/CacheFreshnessControls";
 import { formatUsdc } from "@/lib/money";
 import {
   availableCreatorLiquidityUnits,
+  feeStateFromClaimFees,
   maxFixedOddsStakeUnits,
-  previewChallengerPayout,
+  PENDING_FEE_STATE,
+  poolCreatorPayoutUnits,
+  previewChallengerPayoutSafe,
+  principalSafePayout,
+  toPrincipalSafePreview,
+  type PayoutFeeState,
 } from "@/lib/payout";
 import { unitsToUsdc, usdcToUnits } from "@/lib/usdc";
 import { toCanonicalMode } from "@/lib/market-modes";
 import { MarketAnalytics } from "@/components/MarketAnalytics";
+import { MarketPanelSkeleton, RivalryPanelSkeleton } from "@/components/ui/AsyncPanelSkeleton";
 import { track } from "@/lib/analytics/client";
 import { idempotencyKey } from "@/lib/analytics/events";
 import { stakeBucket } from "@/lib/analytics/useMarketAnalytics";
 import ReasoningFeed from "@/components/vs/ReasoningFeed";
 import { acquireTxLock } from "@/lib/tx-lock";
+import { evaluateUsdcTrustlineGate } from "@/lib/usdcTrustlineGate";
 import {
   MIN_STAKE,
   ZERO_ADDRESS,
@@ -55,8 +65,6 @@ import {
 } from "@/lib/constants";
 import {
   MOCK_CREATED_VS_ID,
-  mergeMockSnapshotIntoVs,
-  readCreateMockSnapshot,
 } from "@/lib/mockVsCreate";
 import { SAMPLE_VS } from "@/lib/sampleVs";
 import { useCountdown } from "@/lib/hooks";
@@ -80,7 +88,10 @@ import ResolutionTerminal from "@/components/ResolutionTerminal";
 import { ShareMarket } from "@/components/vs/ShareMarket";
 import { ProfileLink } from "@/components/ui/AddressChip";
 import ClaimPayoutCard from "@/components/vs/ClaimPayoutCard";
-import { UsdcTrustlineGate } from "@/components/wallet/UsdcTrustlineGate";
+import {
+  UsdcTrustlineGate,
+  useUsdcTrustline,
+} from "@/components/wallet/UsdcTrustlineGate";
 import VsXmtpPanel from "@/components/xmtp/VsXmtpPanel";
 import CouncilVoteWidget from "@/components/council/CouncilVoteWidget";
 import Stage from "@/components/Stage";
@@ -568,10 +579,6 @@ function txToastOptions(result: {
     : undefined;
 }
 
-// On-chain refresh cadence; the loading spinner gives up after
-// MAX_FETCH_ATTEMPTS * VS_POLL_INTERVAL_MS (~2 min).
-const VS_POLL_INTERVAL_MS = 10_000;
-const MAX_FETCH_ATTEMPTS = 12;
 // How long the verdict overlay / seal stamp stays on screen.
 const VERDICT_OVERLAY_MS = 4000;
 // Resolution terminal types line by line; phases advance on this cadence and
@@ -750,26 +757,49 @@ export default function VSDetailPage() {
   const isSampleVS = vsId < 0 && !!SAMPLE_VS[vsId];
   const inviteFromUrl = searchParams.get("invite")?.trim() ?? "";
   const { address, isConnected, connect, signer } = useWallet();
+  const trustline = useUsdcTrustline();
   const t = useTranslations("vsDetail");
+  const tWallet = useTranslations("wallet");
   const tc = useTranslations("common");
   const tStamp = useTranslations("stamp");
   const tBadges = useTranslations("badges");
 
-  const [vs, setVS] = useState<VSData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [fetchAttempts, setFetchAttempts] = useState(0);
+  const [storedInviteKey, setStoredInviteKey] = useState("");
+
+  const inviteKey = inviteFromUrl || storedInviteKey;
+
+  // ── useVsDetail: generation-guarded polling, freshness, user-context ────────
+  const {
+    phase: vsPhase,
+    vs,
+    cache: vsFreshness,
+    fetchAttempts,
+    refreshing,
+    challengeStake,
+    setChallengeStake,
+    resetChallengeStake,
+    refresh: refreshVs,
+  } = useVsDetail({ vsId, address, inviteKey, isSampleVS });
+
+  /** Convenience: true during initial load (skeleton shown). */
+  const loading = vsPhase === "loading";
+
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [resolvePhase, setResolvePhase] = useState(-1);
   const [showVerdict, setShowVerdict] = useState(false);
-  const [challengeStake, setChallengeStake] = useState("");
+  /**
+   * The claim's snapshotted fee terms, which turn the gross preview into the
+   * number the contract will actually pay. Read once per claim: the snapshot is
+   * immutable after create, so it cannot go stale while the page is open.
+   */
+  const [feeState, setFeeState] = useState<PayoutFeeState>(PENDING_FEE_STATE);
   const [rivalryChain, setRivalryChain] = useState<VSData[]>([]);
   const [rivalryLoading, setRivalryLoading] = useState(false);
   // Evita parpadeos: si cambiamos de `vs.id` o aún no terminó el fetch,
   // mostramos "loading" en vez de "empty" con datos viejos/vacíos.
   const [rivalryLoadedForVsId, setRivalryLoadedForVsId] = useState<number | null>(null);
   const [isRivalryExpanded, setIsRivalryExpanded] = useState(false);
-  const [storedInviteKey, setStoredInviteKey] = useState("");
   const [marketTermsOpen, setMarketTermsOpen] = useState(false);
   const marketTermsHeadingId = useId();
   const marketTermsPanelId = useId();
@@ -783,8 +813,6 @@ export default function VSDetailPage() {
   const [, setHasAttemptedResolve] = useState(false);
 
   const countdown = useCountdown(vs?.deadline || 0);
-
-  const inviteKey = inviteFromUrl || storedInviteKey;
 
   useEffect(() => {
     setDesignLifecycleStep(null);
@@ -822,54 +850,39 @@ export default function VSDetailPage() {
     setStoredInviteKey(getStoredPrivateInviteKey(vsId));
   }, [inviteFromUrl, isSampleVS, vsId]);
 
-  const fetchVS = useCallback(async () => {
-    if (isSampleVS) {
-      let data = SAMPLE_VS[vsId];
-      if (vsId === MOCK_CREATED_VS_ID) {
-        const snap = readCreateMockSnapshot();
-        if (snap) {
-          data = mergeMockSnapshotIntoVs(data, snap);
-        }
-      }
-      setVS(data);
-      setLoading(false);
-      return;
-    }
-
-    const data = await getVS(vsId, {
-      inviteKey,
-      viewerAddress: address ?? undefined,
-    });
-    if (data) {
-      setVS(data);
-      setLoading(false);
-      setFetchAttempts(0);
-    } else {
-      // Show optimistic data from localStorage while consensus is pending
-      const pending = getPendingVS(vsId);
-      if (pending) {
-        setVS(pending);
-        setLoading(false);
-      }
-      // Keep polling — once on-chain data arrives it replaces the pending item.
-      // Give up on the loading spinner after ~2 min.
-      setFetchAttempts((prev) => {
-        const next = prev + 1;
-        if (next >= MAX_FETCH_ATTEMPTS) setLoading(false);
-        return next;
-      });
-    }
-  }, [address, inviteKey, isSampleVS, vsId]);
-
+  // Fee terms are a separate, optional read from the market itself. `loading`
+  // while it is in flight, `unavailable` when the read fails or no contract is
+  // configured, `invalid` when the answer is a snapshot the contract could not
+  // have written. The preview falls back to the gross in every one of those
+  // cases, and says so — it never guesses a fee.
   useEffect(() => {
-    fetchVS();
     if (isSampleVS) {
+      // A sample market is not a real claim, so there is no snapshot to read and
+      // inventing a fee schedule would be fiction.
+      setFeeState({ status: "unavailable" });
       return;
     }
+    let cancelled = false;
+    setFeeState(PENDING_FEE_STATE);
+    getClaimFees(vsId)
+      .then((terms) => {
+        if (!cancelled) setFeeState(feeStateFromClaimFees(terms));
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        console.warn("[vsDetail] claim fee terms read failed", err);
+        setFeeState({ status: "unavailable" });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isSampleVS, vsId]);
 
-    const intervalId = setInterval(fetchVS, VS_POLL_INTERVAL_MS);
-    return () => clearInterval(intervalId);
-  }, [fetchVS, isSampleVS]);
+  /**
+   * Alias kept for the resolve-tx watcher and ClaimPayoutCard so that existing
+   * call sites read naturally.  Delegates to the hook's `refresh`.
+   */
+  const fetchVS = useCallback(() => refreshVs(), [refreshVs]);
 
   useEffect(() => {
     if (!vs || vs.state !== "resolved" || !pendingResolveRef.current) {
@@ -924,16 +937,6 @@ export default function VSDetailPage() {
       cancelled = true;
     };
   }, [address, fetchVS, isSampleVS, pendingResolveTxHash, t]);
-
-  useEffect(() => {
-    setChallengeStake("");
-  }, [vsId]);
-
-  useEffect(() => {
-    if (vs && challengeStake === "") {
-      setChallengeStake(String(vs.stake_amount));
-    }
-  }, [challengeStake, vs]);
 
   useEffect(() => {
     // La rivalry chain puede ser costosa y además se recalcula en cada refresh del VS.
@@ -1038,9 +1041,9 @@ export default function VSDetailPage() {
 
   if (loading) {
     return (
-      <div className="text-center py-20">
-        <div className="w-10 h-10 border-2 border-transparent border-t-pv-emerald rounded-full animate-spin mx-auto mb-4" />
-        <p className="text-pv-muted text-sm">
+      <div>
+        <MarketPanelSkeleton />
+        <p className="sr-only">
           {fetchAttempts > 1 ? t("submittedPending") : tc("loading")}
         </p>
       </div>
@@ -1068,11 +1071,23 @@ export default function VSDetailPage() {
   const isOpponent = didUserChallengeVS(display, address);
   const isPrivateVS = isVSPrivate(vs);
   const missingPrivateInvite = isPrivateVS && !inviteKey && !isCreator && !isOpponent;
+  // Disconnected visitors get the connect CTA, not the stake form. The payout
+  // preview inside that form is address-independent (see
+  // `previewChallengerPayoutSafe`), so it needs no disconnected fallback of its
+  // own — connection gates the form and the action, not the number.
   const canAccept =
     !isSampleVS &&
     !missingPrivateInvite &&
     isVSJoinable(vs, address) &&
     isConnected;
+  const acceptTrustlineGate = evaluateUsdcTrustlineGate({
+    action: "accept",
+    status: trustline.status,
+    loading: trustline.loading,
+    stale: trustline.stale,
+    isConnected,
+    hasSigner: Boolean(signer),
+  });
   const canCancel = !isSampleVS && vs.state === "open" && isCreator;
   const hasWinner = hasVSWinner(display);
   const creatorRequestedResolve = Boolean(display.creator_requested_resolve);
@@ -1153,23 +1168,38 @@ export default function VSDetailPage() {
   });
 
   // Previewed in atomic USDC units by lib/payout.ts, so the number shown matches
-  // what the contract will actually transfer (integer truncation included).
+  // what the contract will actually transfer (integer truncation included), and
+  // split with the claim's snapshotted fees so it matches what will actually be
+  // paid. `feeAdjusted` is false while the fee terms are loading, unavailable or
+  // invalid — the panel then shows the gross and labels it, because the gross is
+  // the most the position can pay and never below the stake.
   const stakePreview = hasValidChallengeStake
-    ? previewChallengerPayout({
+    ? previewChallengerPayoutSafe({
         settlementMode: canonicalMode.settlementMode,
         stake: challengeStakeValue,
         creatorStake,
         challengerPoolBefore: challengerStake,
         challengerPayoutBps: display.challenger_payout_bps,
+        fees: feeState,
       })
     : null;
-  const challengePayoutPreview = stakePreview?.totalReturn ?? null;
-  const challengeProfitPreview = stakePreview?.netProfit ?? null;
-  const creatorPayoutPreview = hasValidChallengeStake
-    ? pool + challengeStakeValue
-    : pool;
   const isPoolPreview = canonicalMode.settlementMode === "pool";
   const totalChallengerStakeAfterJoin = challengerStake + (hasValidChallengeStake ? challengeStakeValue : 0);
+  // The creator's side is settled with the same snapshot, so the "if creator wins"
+  // figure is net too. Showing one leg gross and the other net would make the two
+  // tiles incomparable.
+  const creatorPayoutPreview = hasValidChallengeStake
+    ? toPrincipalSafePreview(
+        principalSafePayout({
+          gross: poolCreatorPayoutUnits({
+            creatorStakeUnits: usdcToUnits(creatorStake),
+            challengerPoolUnits: usdcToUnits(totalChallengerStakeAfterJoin),
+          }),
+          feeState,
+          outcome: "creator_wins",
+        }),
+      ).netPayout
+    : pool;
 
   // Fixed odds: capacity is bounded by the creator's UNRESERVED liquidity, not by
   // a slot count, and it shrinks as each challenger reserves their profit. Read
@@ -1238,6 +1268,10 @@ export default function VSDetailPage() {
       toast.error(t("invalidChallengeStakeMin", { amount: MIN_STAKE }));
       return;
     }
+    if (!acceptTrustlineGate.allowed) {
+      toast.error(tWallet(acceptTrustlineGate.messageKey));
+      return;
+    }
 
     await withTxLock(async (wallet) => {
     flushSync(() => {
@@ -1250,12 +1284,12 @@ export default function VSDetailPage() {
       });
 
       if (!liveVS) {
-        setVS(null);
+        void fetchVS();
         toast.error(t("notFound"));
         return;
       }
 
-      setVS(liveVS);
+      void fetchVS();
 
       if (!isVSJoinable(liveVS, address)) {
         toast.error(t("challengeUnavailable"));
@@ -1307,6 +1341,7 @@ export default function VSDetailPage() {
             }),
         txToastOptions(result)
       );
+      resetChallengeStake();
       fetchVS();
     } catch (err: any) {
       track({
@@ -1434,10 +1469,18 @@ export default function VSDetailPage() {
           stakePreview
             ? {
                 stake: challengeStakeValue,
-                totalReturn: stakePreview.totalReturn,
-                netProfit: stakePreview.netProfit,
-                upsideBps: stakePreview.upsideBps,
+                // Analytics deliberately keeps the GROSS formula output for the
+                // money fields. `stake_previewed` / `payout_preview_seen` have
+                // always meant "the pool/fixed-odds math for this stake", and
+                // re-pointing them at the fee-adjusted net would silently change
+                // every historical comparison. `feeAdjusted` records which figure
+                // the user actually saw, so the two are never conflated; a future
+                // schema version can carry both if a dashboard needs the net.
+                totalReturn: stakePreview.gross.totalReturn,
+                netProfit: stakePreview.gross.netProfit,
+                upsideBps: stakePreview.gross.upsideBps,
                 isLowUpside: stakePreview.isLowUpside,
+                feeAdjusted: stakePreview.feeAdjusted,
               }
             : null
         }
@@ -1528,6 +1571,19 @@ export default function VSDetailPage() {
                 ) : null}
               </div>
             )}
+          </AnimatedItem>
+        )}
+
+        {/* Freshness pill + manual refresh — only for real on-chain markets, not sample previews */}
+        {!isSampleVS && (vsFreshness || refreshing) && (
+          <AnimatedItem>
+            <div className="mb-6 sm:mb-8">
+              <CacheFreshnessControls
+                freshness={vsFreshness}
+                onRefresh={refreshVs}
+                refreshing={refreshing}
+              />
+            </div>
           </AnimatedItem>
         )}
 
@@ -1927,7 +1983,7 @@ export default function VSDetailPage() {
               {/* A brand-new Stellar account cannot hold USDC until it trusts the
                   issuer, so the first-ever stake needs this once. Renders nothing
                   for an account that is already set up. */}
-              {canAccept && <UsdcTrustlineGate />}
+              {canAccept && <UsdcTrustlineGate trustline={trustline} />}
 
               {canAccept && (
                 <GlassCard glass className="!rounded-2xl border border-pv-ink/[0.12]">
@@ -1945,7 +2001,7 @@ export default function VSDetailPage() {
                         variant="fuch"
                         onClick={handleAccept}
                         loading={actionLoading === "accept"}
-                        disabled={!hasValidChallengeStake}
+                        disabled={!hasValidChallengeStake || !acceptTrustlineGate.allowed}
                         className="h-[3.25rem] w-full"
                       >
                         {actionLoading === "accept"
@@ -1958,17 +2014,20 @@ export default function VSDetailPage() {
                     {stakePreview && (
                       <div className="mt-4 overflow-hidden rounded-xl border border-pv-ink/[0.1] bg-pv-bg/35">
                         {/* Total return, returned principal and net profit are shown
-                            separately — a single "payout" number reads as profit. */}
+                            separately — a single "payout" number reads as profit.
+                            Every figure is after the claim's snapshotted fees when
+                            they could be read, so `totalReturn` is what lands in the
+                            wallet, which is what that word has always meant here. */}
                         <div className="grid grid-cols-1 gap-px bg-pv-ink/[0.07] p-px sm:grid-cols-2">
                           <div className="min-w-0 bg-pv-bg/70 px-3.5 py-3">
                             <div className="text-[10px] font-bold uppercase tracking-[0.14em] text-pv-muted">
                               {t("totalReturn")}
                             </div>
                             <div className="mt-1.5 font-mono text-sm font-bold tabular-nums text-pv-emerald sm:text-base">
-                              {formatUsdc(stakePreview.totalReturn)}
+                              {formatUsdc(stakePreview.netPayout)}
                             </div>
                             <div className="mt-1 font-mono text-[10px] tabular-nums text-pv-muted">
-                              {stakePreview.totalReturnMultiple.toFixed(2)}× {t("totalReturnMultipleHint")}
+                              {stakePreview.netMultiple.toFixed(2)}× {t("totalReturnMultipleHint")}
                             </div>
                           </div>
                           <div className="min-w-0 bg-pv-bg/70 px-3.5 py-3">
@@ -1976,7 +2035,7 @@ export default function VSDetailPage() {
                               {t("returnedPrincipal")}
                             </div>
                             <div className="mt-1.5 font-mono text-sm font-bold tabular-nums text-pv-text sm:text-base">
-                              {formatUsdc(stakePreview.returnedPrincipal)}
+                              {formatUsdc(stakePreview.principal)}
                             </div>
                           </div>
                           <div className="min-w-0 bg-pv-bg/70 px-3.5 py-3">
@@ -1995,6 +2054,29 @@ export default function VSDetailPage() {
                               {formatUsdc(creatorPayoutPreview)}
                             </div>
                           </div>
+                        </div>
+                        {/* The fee is stated, not implied. When the snapshot could
+                            not be read the gross is shown and labelled as such —
+                            an unlabelled gross would read as take-home. */}
+                        <div className="border-t border-pv-ink/[0.07] px-3.5 py-3 text-xs leading-relaxed">
+                          {stakePreview.clamped ? (
+                            <p className="text-pv-gold">{t("payoutFeeClamped")}</p>
+                          ) : stakePreview.feeAdjusted ? (
+                            <p className="text-pv-muted">
+                              {t("payoutFeeLine", { fee: formatUsdc(stakePreview.totalFee) })}
+                              {stakePreview.agentOwnerFee > 0
+                                ? ` ${t("payoutFeeSplit", {
+                                    platform: formatUsdc(stakePreview.platformFee),
+                                    owner: formatUsdc(stakePreview.agentOwnerFee),
+                                  })}`
+                                : null}
+                            </p>
+                          ) : stakePreview.feeStatus === "loading" ? (
+                            <p className="text-pv-muted">{t("payoutFeeChecking")}</p>
+                          ) : (
+                            <p className="text-pv-gold">{t("payoutFeeUnknown")}</p>
+                          )}
+                          <p className="mt-1 text-pv-muted">{t("principalGuarantee")}</p>
                         </div>
                         {isFixedOdds && (
                           <p
@@ -2017,7 +2099,7 @@ export default function VSDetailPage() {
                         {stakePreview.isLowUpside && (
                           <p className="border-t border-pv-gold/25 bg-pv-gold/[0.07] px-3.5 py-3 text-xs leading-relaxed text-pv-gold">
                             {t("lowUpsideWarning", {
-                              stake: formatUsdc(stakePreview.returnedPrincipal),
+                              stake: formatUsdc(stakePreview.principal),
                               profit: formatUsdc(stakePreview.netProfit),
                             })}
                           </p>
@@ -2038,7 +2120,7 @@ export default function VSDetailPage() {
                     )}
                     <p className="text-xs text-pv-muted mt-3">
                       {canonicalMode.settlementMode === "fixed_odds" && stakePreview
-                        ? t("challengeStakeHintFixed", { payout: stakePreview.totalReturn })
+                        ? t("challengeStakeHintFixed", { payout: stakePreview.netPayout })
                         : t("challengeStakeHintPool")}
                     </p>
                     <p className="text-xs text-pv-muted mt-2">
@@ -2427,9 +2509,7 @@ export default function VSDetailPage() {
                         </div>
 
                         {!isRivalryDataReady || rivalryLoading ? (
-                          <div className="rounded-xl border border-pv-ink/[0.08] bg-pv-bg/30 p-4 sm:p-5">
-                            <p className="text-sm text-pv-muted">{tc("loading")}</p>
-                          </div>
+                          <RivalryPanelSkeleton />
                         ) : seriesView.rows.length > 1 ? (
                           <div className="rounded-xl border border-pv-ink/[0.08] bg-pv-bg/30 p-4 sm:p-5">
                             <div className="space-y-3">

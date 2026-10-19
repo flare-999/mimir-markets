@@ -28,19 +28,19 @@ test("parseAddressParam accepts both strkey forms verbatim and rejects EVM", asy
 
 test("actorIdForAddress hashes a Stellar address and stays case-sensitive", async () => {
   const { actorIdForAddress } = await import("../../lib/analytics/actor");
-  const id = actorIdForAddress(ACCOUNT_A, "salt");
+  const id = actorIdForAddress(ACCOUNT_A, "stellar-address-test-salt");
   assert.ok(id, "a real Stellar account must be hashable into an actor id");
   assert.match(id, /^[0-9a-f]{32}$/);
 
   // Distinct accounts must not collide, and case-folding must not be applied:
   // folding would map two different strings onto one id.
-  assert.notEqual(actorIdForAddress(ACCOUNT_B, "salt"), id);
+  assert.notEqual(actorIdForAddress(ACCOUNT_B, "stellar-address-test-salt"), id);
   assert.equal(
-    actorIdForAddress(ACCOUNT_A.toLowerCase(), "salt"),
+    actorIdForAddress(ACCOUNT_A.toLowerCase(), "stellar-address-test-salt"),
     null,
     "a lowercased strkey is not a valid address and must not be hashed",
   );
-  assert.equal(actorIdForAddress(EVM_ADDRESS, "salt"), null);
+  assert.equal(actorIdForAddress(EVM_ADDRESS, "stellar-address-test-salt"), null);
 });
 
 test("containsRawAddress detects an unredacted Stellar address", async () => {

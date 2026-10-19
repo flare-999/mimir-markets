@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 
 import { BlueprintHeading } from "@/components/BlueprintGrid";
 import { Bps, SignedUsdc, TimeWindowTabs } from "@/components/agents/AgentStats";

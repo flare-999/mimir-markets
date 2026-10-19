@@ -27,6 +27,8 @@
  * stable enough to test.
  */
 
+import { isHash32Hex } from "../content-hash";
+
 export type ChainEventName =
   | "ClaimCreated"
   | "ClaimChallenged"
@@ -152,7 +154,9 @@ export function project(
       if (!claims.has(event.claimId)) {
         claims.set(event.claimId, {
           claimId: event.claimId,
-          creator: (event.creator ?? "").toLowerCase(),
+          // Stellar strkeys are case-sensitive. Preserve them byte-for-byte so a
+          // replay cannot manufacture an address that the chain does not know.
+          creator: event.creator ?? "",
           category: event.category ?? "custom",
           state: "open",
           challengers: [],
@@ -178,7 +182,7 @@ export function project(
 
     switch (event.name) {
       case "ClaimChallenged": {
-        const address = (event.challenger ?? "").toLowerCase();
+        const address = event.challenger ?? "";
         const stakeUnits = event.stakeUnits ?? 0n;
         // One address challenges at most once per claim on chain, so a repeat is
         // data corruption rather than a second position — keep the first.
@@ -194,7 +198,15 @@ export function project(
         claim.state = "resolved";
         claim.winnerSide = event.winnerSide ?? 0;
         claim.confidence = event.confidence ?? 0;
-        claim.evidenceHash = event.evidenceHash ?? null;
+        // Validate the hash before storing it. A malformed `evidenceHash` in the
+        // event (e.g. a legacy placeholder like "sha256:fixture-evidence" from
+        // a test fixture, or a truncated value from a buggy decoder) is stored as
+        // null rather than verbatim, so the fingerprint is stable and the read-index
+        // never reports a hash that `decodeHash32Hex` would reject at the contract
+        // boundary. `isHash32Hex` accepts both bare hex and the `0x`-prefixed form.
+        claim.evidenceHash = isHash32Hex(event.evidenceHash ?? null)
+          ? (event.evidenceHash ?? null)
+          : null;
         claim.isFinal = true;
         break;
       case "ClaimCancelled":

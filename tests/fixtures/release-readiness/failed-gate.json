@@ -1,0 +1,77 @@
+{
+  "schemaVersion": 1,
+  "kind": "mimir-release-readiness",
+  "results": {
+    "typecheck": { "status": "pass", "detail": "tsc --noEmit clean" },
+    "forbidden-terms": {
+      "status": "pass",
+      "detail": "no forbidden terms in tracked files"
+    },
+    "contract-tests": {
+      "status": "pass",
+      "detail": "cargo test --release green"
+    },
+    "contract-build": {
+      "status": "pass",
+      "detail": "both release Wasm files built"
+    },
+    "node-tests": { "status": "pass", "detail": "node:test suite green" },
+    "app-build": { "status": "pass", "detail": "next build produced a bundle" },
+    "browser-smoke": { "status": "pass", "detail": "secret-free smoke green" },
+    "artifact-provenance": {
+      "status": "pass",
+      "detail": "manifest pins match the built Wasm digests"
+    },
+    "release-sbom": {
+      "status": "pass",
+      "detail": "CycloneDX 1.5 document with a non-empty component set"
+    },
+    "cache-backup-verify": {
+      "status": "pass",
+      "detail": "fixture archive checksum and privacy checks pass"
+    },
+    "ledger-fixture-replay": {
+      "status": "pass",
+      "detail": "fixture replays to the reviewed fingerprint"
+    },
+    "release-readiness-checklist": {
+      "status": "pass",
+      "detail": "checklist coherent and documented"
+    },
+    "deployment-verification": {
+      "status": "fail",
+      "detail": "get_fee_policy.platform_fee_bps read 250 on chain, expected 200",
+      "artifact": "verify-deployment log retained with the release record"
+    },
+    "onchain-smoke": {
+      "status": "pass",
+      "detail": "resolve and squad smoke verified on Testnet"
+    },
+    "x402-payment-smoke": {
+      "status": "pass",
+      "detail": "paid proof verified off Horizon"
+    },
+    "analytics-gates": {
+      "status": "pass",
+      "detail": "funnels measurable, required fields 99% complete"
+    },
+    "contract-audit": {
+      "status": "pass",
+      "detail": "independent Soroban audit attached"
+    },
+    "legal-eligibility-review": {
+      "status": "pass",
+      "detail": "approvals recorded"
+    },
+    "redundant-providers": {
+      "status": "pass",
+      "detail": "second provider configured"
+    },
+    "funded-feature-flags": {
+      "status": "pass",
+      "detail": "funded features off"
+    },
+    "rollback-rehearsal": { "status": "pass", "detail": "rollback rehearsed" },
+    "load-baseline": { "status": "pass", "detail": "baselines recorded" }
+  }
+}

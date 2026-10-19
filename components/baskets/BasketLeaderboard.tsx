@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 
 import { AgentAvatarStack } from "@/components/agents/AgentAvatar";
 import type { TimeWindow } from "@/lib/agents/performance";

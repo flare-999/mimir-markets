@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { useTranslations } from "next-intl";
 import {
   CheckCircle2,
   CircleDashed,
@@ -8,7 +9,6 @@ import {
   ShieldCheck,
   ShieldX,
 } from "lucide-react";
-import { useTranslations } from "next-intl";
 
 import { computeClaimQuality, type ClaimQualityInput } from "@/lib/claimQuality";
 import { GlassCard } from "@/components/ui";

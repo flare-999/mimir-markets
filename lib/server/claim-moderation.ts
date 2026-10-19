@@ -248,12 +248,24 @@ export async function moderateClaim(args: {
   // Rules-first: block obvious disallowed topics without spending Gemini quota.
   for (const pattern of LOCAL_BLOCK_PATTERNS) {
     if (pattern.re.test(combinedText)) {
-      return {
+      const result: ClaimModerationResult = {
         decision: "block",
         violationCodes: [pattern.code],
         confidence: 100,
         policyVersion: "local-rules:v1",
       };
+      console.log(
+        JSON.stringify({
+          audit: "claim_moderation",
+          input: args.input,
+          decision: result.decision,
+          violationCodes: result.violationCodes,
+          confidence: result.confidence,
+          policyVersion: result.policyVersion,
+          locale,
+        })
+      );
+      return result;
     }
   }
 
@@ -265,6 +277,20 @@ export async function moderateClaim(args: {
     input: args.input,
   });
   const raw = await callGemini(prompt);
-  return sanitizeModerationResult({ raw, policyVersion, locale });
+  const result = sanitizeModerationResult({ raw, policyVersion, locale });
+  
+  console.log(
+    JSON.stringify({
+      audit: "claim_moderation",
+      input: args.input,
+      decision: result.decision,
+      violationCodes: result.violationCodes,
+      confidence: result.confidence,
+      policyVersion: result.policyVersion,
+      locale,
+    })
+  );
+
+  return result;
 }
 

@@ -1,3 +1,4 @@
+
 /**
  * Deploy `mimir-market` + `mimir-squad` to Stellar Testnet.
  *
@@ -19,6 +20,7 @@
  *   npx tsx deploy/deploy.ts
  *   npx tsx deploy/deploy.ts --no-build          # reuse existing target/ wasm
  *   npx tsx deploy/deploy.ts --force-redeploy    # ignore ids already in .env.local
+ *   npx tsx deploy/deploy.ts --plan              # validate + preview, no network writes
  */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
@@ -40,12 +42,18 @@ import {
   writeEnvLocal,
 } from "../scripts/lib/stellar-env";
 
+import {
+  formatProvenanceReport,
+  verifyRepoArtifactProvenance,
+} from "../lib/ops/artifact-provenance";
+
 const CONTRACTS_DIR = path.join(REPO_ROOT, "contracts-soroban");
 const WASM_DIR = path.join(CONTRACTS_DIR, "target", "wasm32v1-none", "release");
 
 const args = new Set(process.argv.slice(2));
 const skipBuild = args.has("--no-build");
 const forceRedeploy = args.has("--force-redeploy");
+const planMode = args.has("--plan");
 
 /**
  * Starting fee policy. `platform_fee_bps + agent_owner_fee_bps` must stay at or
@@ -81,6 +89,129 @@ const DEPLOYABLES: Deployable[] = [
     envKey: ENV_KEYS.squadId,
   },
 ];
+
+// ── Plan / validation ────────────────────────────────────────────────────────
+
+export interface PlanInputs {
+  deployerPublic?: string;
+  oraclePublic?: string;
+  platformFeeBps: number;
+  agentOwnerFeeBps: number;
+  usdcSac?: string;
+  wasmHashes?: Record<string, string>;
+  manifestHashes?: Record<string, string>;
+}
+
+export interface PlanResult {
+  ok: boolean;
+  errors: string[];
+  warnings: string[];
+  steps: string[];
+}
+
+const STELLAR_ADDRESS_RE = /^[GC][A-Z2-7]{55}$/;
+const CONTRACT_ID_RE = /^C[A-Z2-7]{55}$/;
+
+/**
+ * Pure validation for `--plan`. Resolves and checks every input that the real
+ * deploy would consume, without touching the network or signing anything.
+ * Returns the intended steps so the caller can print them.
+ */
+export function buildDeployPlan(inputs: PlanInputs): PlanResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const steps: string[] = [];
+
+  // Network / passphrase are compile-time constants; surface them for the preview.
+  steps.push(`network: ${NETWORK}`);
+  steps.push(`rpc: ${SOROBAN_RPC_URL}`);
+  steps.push(`passphrase: ${NETWORK_PASSPHRASE}`);
+
+  // Deployer / owner address.
+  if (!inputs.deployerPublic) {
+    errors.push(`${ENV_KEYS.deployerPublic} is missing (run: npx tsx scripts/stellar-keys.ts)`);
+  } else if (!STELLAR_ADDRESS_RE.test(inputs.deployerPublic)) {
+    errors.push(`${ENV_KEYS.deployerPublic} is not a valid Stellar account address: ${inputs.deployerPublic}`);
+  } else {
+    steps.push(`owner/platform_recipient: ${inputs.deployerPublic}`);
+  }
+
+  // Oracle address.
+  if (!inputs.oraclePublic) {
+    errors.push(`${ENV_KEYS.oraclePublic} is missing (run: npx tsx scripts/stellar-keys.ts)`);
+  } else if (!STELLAR_ADDRESS_RE.test(inputs.oraclePublic)) {
+    errors.push(`${ENV_KEYS.oraclePublic} is not a valid Stellar account address: ${inputs.oraclePublic}`);
+  } else {
+    steps.push(`oracle: ${inputs.oraclePublic}`);
+  }
+
+  // Fee policy.
+  const { platformFeeBps, agentOwnerFeeBps } = inputs;
+  if (!Number.isInteger(platformFeeBps) || platformFeeBps < 0) {
+    errors.push(`${ENV_KEYS.platformFeeBps} must be a non-negative integer; got ${platformFeeBps}`);
+  }
+  if (!Number.isInteger(agentOwnerFeeBps) || agentOwnerFeeBps < 0) {
+    errors.push(`${ENV_KEYS.agentOwnerFeeBps} must be a non-negative integer; got ${agentOwnerFeeBps}`);
+  }
+  if (
+    Number.isInteger(platformFeeBps) &&
+    Number.isInteger(agentOwnerFeeBps) &&
+    platformFeeBps >= 0 &&
+    agentOwnerFeeBps >= 0 &&
+    platformFeeBps + agentOwnerFeeBps > MAX_TOTAL_FEE_BPS
+  ) {
+    errors.push(
+      `${ENV_KEYS.platformFeeBps} + ${ENV_KEYS.agentOwnerFeeBps} = ${platformFeeBps + agentOwnerFeeBps} ` +
+        `exceeds MAX_TOTAL_FEE_BPS (${MAX_TOTAL_FEE_BPS})`,
+    );
+  }
+  if (platformFeeBps > 0 && !inputs.deployerPublic) {
+    errors.push(
+      `${ENV_KEYS.platformFeeBps} is non-zero but ${ENV_KEYS.deployerPublic} (platform_recipient) is missing ` +
+        `(Error::FeeNeedsRecipient)`,
+    );
+  }
+  steps.push(`fee policy: platform ${platformFeeBps} bps, agent-owner ${agentOwnerFeeBps} bps (cap ${MAX_TOTAL_FEE_BPS})`);
+
+  // USDC SAC.
+  if (inputs.usdcSac !== undefined) {
+    if (!CONTRACT_ID_RE.test(inputs.usdcSac)) {
+      errors.push(`${ENV_KEYS.usdcSac} is not a valid contract id: ${inputs.usdcSac}`);
+    } else {
+      steps.push(`usdc sac: ${inputs.usdcSac}`);
+    }
+  } else {
+    steps.push(`usdc sac: (derived from ${USDC_ASSET} at deploy time)`);
+  }
+
+  // Wasm hash vs manifest.
+  if (inputs.wasmHashes && inputs.manifestHashes) {
+    for (const target of DEPLOYABLES) {
+      const actual = inputs.wasmHashes[target.key];
+      const expected = inputs.manifestHashes[target.key];
+      if (!actual) {
+        errors.push(`missing built wasm for ${target.label} (${target.wasm})`);
+      } else if (!expected) {
+        warnings.push(`no manifest entry for ${target.label}; cannot verify wasm hash`);
+      } else if (actual !== expected) {
+        errors.push(
+          `${target.label} wasm hash ${actual} does not match deploy/contract-artifacts.manifest.json (${expected})`,
+        );
+      } else {
+        steps.push(`${target.label} wasm hash: ${actual} ✓`);
+      }
+    }
+  }
+
+  // Intended steps.
+  steps.push("[1/5] build contracts (or reuse with --no-build)");
+  steps.push("[2/5] resolve USDC SAC and read decimals");
+  steps.push(`[3/5] deploy ${DEPLOYABLES.map((d) => d.label).join(", ")}`);
+  steps.push("[4/5] initialize mimir-market + mimir-squad");
+  steps.push("[5/5] write .env.local");
+
+  return { ok: errors.length === 0, errors, warnings, steps };
+}
 
 // ── CLI plumbing ─────────────────────────────────────────────────────────────
 
@@ -249,6 +380,24 @@ function invokeInitialize(label: string, contractId: string, deployerSecret: str
 // ── Main ─────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  if (planMode) {
+    const plan = buildDeployPlan({
+      deployerPublic: envValue(ENV_KEYS.deployerPublic),
+      oraclePublic: envValue(ENV_KEYS.oraclePublic),
+      platformFeeBps: PLATFORM_FEE_BPS,
+      agentOwnerFeeBps: AGENT_OWNER_FEE_BPS,
+    });
+    console.log("── Mimir Soroban deploy plan (no network writes) ──");
+    for (const step of plan.steps) console.log(`  ${step}`);
+    for (const warning of plan.warnings) console.log(`  ! ${warning}`);
+    if (!plan.ok) {
+      for (const error of plan.errors) console.error(`  ✗ ${error}`);
+      throw new Error(`plan validation failed with ${plan.errors.length} error(s)`);
+    }
+    console.log("\n✓ plan OK — re-run without --plan to deploy");
+    return;
+  }
+
   const deployerSecret = requireEnv(ENV_KEYS.deployerSecret, "run: npx tsx scripts/stellar-keys.ts");
   const deployerPublic = requireEnv(ENV_KEYS.deployerPublic, "run: npx tsx scripts/stellar-keys.ts");
   const oraclePublic = requireEnv(ENV_KEYS.oraclePublic, "run: npx tsx scripts/stellar-keys.ts");
@@ -280,6 +429,17 @@ async function main(): Promise<void> {
 
   buildContracts();
   assertWasmPresent();
+  {
+    const mode = process.env.MIMIR_REQUIRE_ARTIFACT_PROVENANCE === "1" ? "release" : "develop";
+    const provenance = verifyRepoArtifactProvenance({ mode, requireBuilt: true, repoRoot: REPO_ROOT });
+    console.log(formatProvenanceReport(provenance));
+    if (!provenance.ok) {
+      throw new Error(
+        "contract artifact provenance check failed — refuse to deploy mismatched or unverified Wasm " +
+          "(pin digests with npm run verify:artifacts -- --write-pins, or set MIMIR_REQUIRE_ARTIFACT_PROVENANCE=1 for release gating)",
+      );
+    }
+  }
   const usdcSac = resolveUsdcSac(deployerSecret);
 
   console.log("[3/5] deploying wasm…");

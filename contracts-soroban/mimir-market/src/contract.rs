@@ -9,8 +9,9 @@ use crate::escrow;
 use crate::resolve;
 use crate::storage;
 use crate::types::{
-    Challenger, Claim, ClaimFeeView, CreateParams, Error, FeePolicy, MarketConfig, PayoutQuote,
-    PendingFeePolicy, PlatformStats, WinnerSide,
+    Challenger, ChallengerPage, Claim, ClaimFeeView, CreateParams, Error, FeePolicy,
+    MarketConfig, PayoutQuote, PendingFeePolicy, PendingOracle, PlatformStats, Verdict,
+    WinnerSide, MAX_BATCH_SIZE,
 };
 
 #[contract]
@@ -41,8 +42,17 @@ impl MimirMarket {
         )
     }
 
-    pub fn set_oracle(env: Env, new_oracle: Address) -> Result<(), Error> {
-        admin::set_oracle(&env, new_oracle)
+    pub fn queue_oracle(env: Env, new_oracle: Address) -> Result<(), Error> {
+        admin::queue_oracle(&env, new_oracle)
+    }
+
+    pub fn cancel_oracle(env: Env) -> Result<(), Error> {
+        admin::cancel_oracle(&env)
+    }
+
+    /// Permissionless once the timelock has elapsed.
+    pub fn execute_oracle(env: Env) -> Result<(), Error> {
+        admin::execute_oracle(&env)
     }
 
     pub fn transfer_ownership(env: Env, new_owner: Address) -> Result<(), Error> {
@@ -99,6 +109,33 @@ impl MimirMarket {
         resolve::resolve_claim(&env, claim_id, winner_side, summary, confidence, evidence_hash)
     }
 
+    /// Versioned verdict entry point. Identical settlement semantics to
+    /// `resolve_claim`, but the oracle submits a `Verdict` carrying its explicit
+    /// encoding version. Unknown versions are refused with
+    /// `Error::UnsupportedVerdictVersion` and leave the claim untouched.
+    pub fn resolve_claim_versioned(
+        env: Env,
+        claim_id: u64,
+        verdict: Verdict,
+        summary: String,
+        confidence: u32,
+        evidence_hash: BytesN<32>,
+    ) -> Result<(), Error> {
+        resolve::resolve_claim_versioned(
+            &env,
+            claim_id,
+            &verdict,
+            summary,
+            confidence,
+            evidence_hash,
+        )
+    }
+
+    
+    pub fn transition_deadline(env: Env, claim_id: u64) -> Result<(), Error> {
+        claims::transition_deadline(&env, claim_id)
+    }
+
     pub fn cancel_claim(env: Env, claim_id: u64) -> Result<(), Error> {
         claims::cancel_claim(&env, claim_id)
     }
@@ -136,6 +173,92 @@ impl MimirMarket {
         storage::get_claim(&env, claim_id)
     }
 
+    /// The claim's verdict with its explicit encoding version.
+    ///
+    /// Refuses with `Error::UnsupportedVerdictVersion` if the stored verdict was
+    /// written by an encoding this contract does not understand, and with
+    /// `Error::ClaimNotResolved` if the claim has not been resolved.
+    pub fn get_verdict(env: Env, claim_id: u64) -> Result<Verdict, Error> {
+        resolve::get_verdict(&env, claim_id)
+    }
+
+    /// Convenience view returning only the decoded verdict side.
+    pub fn get_verdict_side(env: Env, claim_id: u64) -> Result<WinnerSide, Error> {
+        resolve::get_verdict(&env, claim_id)?.decode()
+    }
+
+    /// Batch-read up to [`MAX_BATCH_SIZE`] claims in one simulated call.
+    ///
+    /// Returns a `Vec<Option<Claim>>` whose length equals `ids.len()`. Each slot
+    /// holds `Some(claim)` when the id exists, or `None` when it does not. The
+    /// slot positions mirror the input positions exactly, so callers can zip the
+    /// result against their id list without any bookkeeping:
+    ///
+    /// ```text
+    /// ids    = [1, 999, 3]
+    /// result = [Some(claim_1), None, Some(claim_3)]
+    /// ```
+    ///
+    /// # Behavior guarantees
+    ///
+    /// - **Pure read.** No money, no auth, no state mutation. Safe to call from
+    ///   any context, including unsigned simulation.
+    /// - **Position-stable.** The output length always equals the input length.
+    /// - **Non-panicking.** An unknown id yields `None`; it does not abort the
+    ///   call or return an error for that slot.
+    /// - **Duplicate ids.** Each occurrence is resolved independently. Two slots
+    ///   for the same id return the same `Claim` value, both `Some(…)`. This is
+    ///   intentional: the function is idempotent and the on-chain state is the
+    ///   same answer for both positions.
+    /// - **Challenger rosters excluded.** Challenger lists live under a separate
+    ///   storage key (`DataKey::Challengers`). Including them in this call would
+    ///   multiply the ledger-entry footprint by up to `MAX_CHALLENGERS` per id,
+    ///   which makes the Soroban footprint budget infeasible for large batches.
+    ///   Use `get_challengers_page` or `get_challenger_list` separately.
+    /// - **TTL extension.** A *present* entry has its TTL extended on read,
+    ///   identical to `get_claim`. A *missing* id does not touch storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(Error::BatchTooLarge)` when `ids.len() > MAX_BATCH_SIZE`
+    /// (currently 50). The call is entirely rejected; no partial read is
+    /// performed. Split the id list into chunks and call again.
+    ///
+    /// Returns `Err(Error::NotInitialized)` when the contract has not yet been
+    /// initialised (mirrors every other read that needs the contract to be live).
+    ///
+    /// # Accounting and trust
+    ///
+    /// This function reads contract state; it moves no USDC and grants no
+    /// authority. The returned `Claim` values are the same data that
+    /// `get_claim` would return one by one. All money-movement invariants
+    /// (creator stake, challenger stakes, remaining_escrow, fees) are unchanged
+    /// and untouched by this call.
+    ///
+    /// No migration is required: this is a new additive entry point that does
+    /// not alter any existing storage key or function signature.
+    pub fn get_claims_batch(
+        env: Env,
+        ids: Vec<u64>,
+    ) -> Result<Vec<Option<Claim>>, Error> {
+        // Guard: reject over-sized requests before touching any persistent storage.
+        if ids.len() > MAX_BATCH_SIZE {
+            return Err(Error::BatchTooLarge);
+        }
+        // Validate the contract is initialised (mirrors get_claim's implicit
+        // check via storage::usdc — but we call a lightweight test here so the
+        // error message is clear even when ids is empty).
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+
+        let mut results: Vec<Option<Claim>> = Vec::new(&env);
+        for id in ids.iter() {
+            results.push_back(storage::get_claim_opt(&env, id));
+        }
+        Ok(results)
+    }
+
     pub fn get_claim_market_config(env: Env, claim_id: u64) -> Result<MarketConfig, Error> {
         Ok(storage::get_claim(&env, claim_id)?.market)
     }
@@ -155,6 +278,27 @@ impl MimirMarket {
     /// already pulled their settlement.
     pub fn get_challenger_list(env: Env, claim_id: u64) -> Vec<Challenger> {
         storage::challengers(&env, claim_id)
+    }
+
+    /// A paginated window into the challenger roster.
+    ///
+    /// Returns up to `limit` entries starting at `offset` (0-based).  
+    /// `limit = 0` returns all entries from `offset` to the end of the roster —
+    /// identical to `get_challenger_list` when `offset = 0`.
+    ///
+    /// The `ChallengerPage` response always carries `total` (full roster length)
+    /// so callers can detect the last page without issuing an extra empty fetch.
+    ///
+    /// Neither `offset` nor `limit` can cause a panic: an `offset` beyond the
+    /// end of the roster returns an empty `items` slice with `total` set
+    /// correctly.
+    pub fn get_challengers_page(
+        env: Env,
+        claim_id: u64,
+        offset: u32,
+        limit: u32,
+    ) -> ChallengerPage {
+        storage::challengers_page(&env, claim_id, offset, limit)
     }
 
     /// What `claim_challenger_payout` would pay this challenger right now.
@@ -183,6 +327,10 @@ impl MimirMarket {
 
     pub fn get_pending_fee_policy(env: Env) -> Option<PendingFeePolicy> {
         storage::pending_fee_policy(&env)
+    }
+
+    pub fn get_pending_oracle(env: Env) -> Option<PendingOracle> {
+        storage::pending_oracle(&env)
     }
 
     pub fn get_owner(env: Env) -> Result<Address, Error> {

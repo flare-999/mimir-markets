@@ -58,14 +58,113 @@ import { isSampleVsIdForXmtp } from "@/lib/xmtp/vs-chat-eligibility";
  *   cuando `getUserVSSnapshot` devuelve `cache`.
  * - **Error de carga**: mensaje accesible + reintento sin perder el último listado cargado con éxito.
  *
- * (Filtros rápidos tipo Explore y orden alternativo viven solo en Arena / Explorer, no en esta barra.)
+ * Dashboard UI — Fase 6 (paginación contract-safe)
+ *
+ * - **Página explícita**: `?page=` con base 1, persistida en la query via `history.replaceState`.
+ *   La paginación se aplica sobre la lista ya filtrada (`filtered`) con el mismo orden
+ *   `newest` del snapshot; no altera la banda KPI (siempre sobre el total filtrado).
+ * - **Tamaño de página**: `DASHBOARD_EXPOSURE_PAGE_SIZE`; el reservado de la URL
+ *   se normaliza con `clampDashboardPage` para evitar páginas fuera de rango.
+ * - **Estados de borde**: una sola página cuando `filtered.length <= pageSize`;
+ *   página válida siempre clampeada a [1, lastPage].
+ * - **Dependency failure**: si el sort o el filtrado fallan, la lista se muestra
+ *   como vacía con el reintento existente (sin perder el snapshot).
  */
 
-/** Filas VS mostradas antes del primer “Load more”. */
+/** Filas VS mostradas por página en Active Exposure. */
 export const DASHBOARD_EXPOSURE_PAGE_SIZE = 5;
 
-/** Filas añadidas en cada “Load more”. */
+/** Filas añadidas en cada “Load more” (legacy, mantenido para compatibilidad). */
 export const DASHBOARD_EXPOSURE_LOAD_MORE = 5;
+
+/** Máximo de filas visibles por "Load more" en una página de Active Exposure. */
+export const DASHBOARD_EXPOSURE_PAGE_SIZE_MAX = 100;
+
+/** Máximo de páginas permitidas para evitar valores de URL absurdos. */
+export const DASHBOARD_EXPOSURE_MAX_PAGE = 10_000;
+
+/**
+ * Normaliza el parámetro `page` de la URL a un entero válido base 1.
+ * Valores inválidos (NaN, 0, negativos, decimales, fuera de rango) caen a 1.
+ */
+export function clampDashboardPage(raw: unknown, maxPage: number = DASHBOARD_EXPOSURE_MAX_PAGE): number {
+  const n = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  const integer = Math.floor(n);
+  if (integer < 1) return 1;
+  return Math.min(integer, maxPage);
+}
+
+/**
+ * Total de páginas para una lista ya filtrada. Siempre >= 1.
+ */
+export function dashboardTotalPages(
+  totalItems: number,
+  pageSize: number = DASHBOARD_EXPOSURE_PAGE_SIZE
+): number {
+  if (!Number.isFinite(totalItems) || totalItems <= 0) return 1;
+  if (!Number.isFinite(pageSize) || pageSize < 1) return 1;
+  return Math.max(1, Math.ceil(totalItems / pageSize));
+}
+
+/**
+ * Resultado de la paginación de la lista de Active Exposure.
+ */
+export type DashboardPaginationResult<T> = {
+  /** Filas de la página actual. */
+  items: T;
+  /** Página actual base 1, ya clampeada. */
+  page: number;
+  /** Total de páginas (>= 1). */
+  totalPages: number;
+  /** Tamaño de página efectivo. */
+  pageSize: number;
+  /** Total de elementos en la lista filtrada. */
+  totalItems: number;
+  /** Índice del primer elemento de la página (1-based). */
+  fromIndex: number;
+  /** Índice del último elemento de la página (1-based). */
+  toIndex: number;
+  /** Si existe una página anterior. */
+  hasPrev: boolean;
+  /** Si existe una página siguiente. */
+  hasNext: boolean;
+};
+
+/**
+ * Pagina una lista ya filtrada de forma pura y contract-safe:
+ * - no muta el input;
+ * - clampea la página requerida a [1, totalPages];
+ * - devuelve indices 1 based para copy de UI ("mostrando X de Y").
+ */
+export function paginateDashboardExposure<T>(
+  items: readonly T[],
+  requestedPage: unknown,
+  pageSize: number = DASHBOARD_EXPOSURE_PAGE_SIZE
+): DashboardPaginationResult<T[]> {
+  const safePageSize =
+    Number.isFinite(pageSize) && pageSize >= 1
+      ? Math.floor(pageSize)
+      : DASHBOARD_EXPOSURE_PAGE_SIZE;
+  const totalItems = items.length;
+  const totalPages = dashboardTotalPages(totalItems, safePageSize);
+  const page = Math.min(clampDashboardPage(requestedPage), totalPages);
+  const start = (page - 1) * safePageSize;
+  const end = Math.min(start + safePageSize, totalItems);
+  const slice = items.slice(start, end);
+
+  return {
+    items: slice,
+    page,
+    totalPages,
+    pageSize: safePageSize,
+    totalItems,
+    fromIndex: totalItems === 0 ? 0 : start + 1,
+    toIndex: end,
+    hasPrev: page > 1,
+    hasNext: page < totalPages,
+  };
+}
 
 /**
  * Muestra las filas demo de `DASHBOARD_STAKE_HOLDING_IDS` solo cuando no hay

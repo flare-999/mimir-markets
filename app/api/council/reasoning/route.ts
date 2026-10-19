@@ -3,22 +3,24 @@
  *
  * GET /api/council/reasoning?claimId=12&persona=optimist   ($0.001 USDC / read)
  *
- * Each of the 10 council personas is a "creator": a reader signs a small USDC
- * authorization to unlock that persona's take on a claim, and the USDC lands
- * DIRECTLY in that persona's own wallet (payTo = persona address).
+ * Each of the 10 council personas is a "creator": a reader signs a small USDC authorization to unlock that persona's take on a claim, and the USDC to DIRECTLY in that persona's own wallet (payTo = persona address).
  * Unpaid → PAYMENT-REQUIRED 402.
  */
 
 import { NextResponse, type NextRequest } from "next/server";
 import { paidRoute, queryParam } from "@/lib/x402/server";
+import { tracedRoute } from "@/lib/ops/trace-http";
 import type { HTTPRequestContext } from "@x402/core/http";
 import { PRICES } from "@/lib/x402/config";
-import { verifyPass } from "@/lib/paid-pass";
+import { verifyPass } from "@/lib/server/paid-pass";
 import { getPersonaBySlug } from "@/agents/council/personas";
 import { getCouncilAddress } from "@/lib/agent-wallets";
 import { readClaimRaw } from "@/lib/contract";
 import { callLLM } from "@/lib/llm";
-import { getCachedReasoning, setCachedReasoning } from "@/lib/server/reasoning-cache";
+import { getCachedReasoning, setCachedReasoning, TTL_MS } from "@/lib/server/reasoning-cache";
+import { buildCouncilPrompt } from "@/lib/server/council-prompt";
+import { produceReasoning, UNAVAILABLE_REASONING } from "@/lib/server/council-reasoning";
+import { buildVSCacheFreshness } from "@/lib/vs-freshness";
 
 const PASS_PLAN = "council";
 
@@ -64,6 +66,11 @@ async function handler(req: NextRequest): Promise<NextResponse> {
       reasoning: cached.reasoning,
       paidTo: hasPass ? null : payTo,
       price: hasPass ? "$0 (pass)" : PRICES.councilReasoning,
+      freshness: buildVSCacheFreshness({
+        updatedAtMs: cached.at,
+        freshnessWindowMs: TTL_MS,
+        source: "index",
+      }),
     });
   }
 
@@ -88,25 +95,19 @@ async function handler(req: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: msg }, { status: 502 });
   }
 
-  const prompt = `${persona.promptBias}
+  // Creator-supplied claim text is fenced as untrusted data and preceded by the
+  // injection guard. The generated text is then checked before caching/returning.
+  const prompt = buildCouncilPrompt(persona, {
+    question,
+    creatorPosition: sideA,
+    counterPosition: sideB,
+  });
 
-You are giving your personal take, in character, on a prediction market claim.
-
-**Claim:** ${question}
-**Side A (creator):** ${sideA}
-**Side B (challenger):** ${sideB}
-
-Write one tight paragraph (max 90 words): which side you lean toward and your honest reasoning. Stay in character.`;
-
-  let reasoning = "";
-  try {
-    reasoning = (await callLLM(prompt, { maxTokens: 300 })).trim();
-    if (reasoning) {
-      // Only successful generations are cached — never the fallback below.
-      setCachedReasoning(claimId, slug, { question, sideA, sideB, reasoning });
-    }
-  } catch {
-    reasoning = "(reasoning unavailable right now)";
+  const generatedAtMs = Date.now();
+  const { reasoning, cacheable } = await produceReasoning(prompt, (p) => callLLM(p, { maxTokens: 300 }));
+  if (cacheable) {
+    // Only generations that passed the publish guard are cached — never the fallback.
+    setCachedReasoning(claimId, slug, { question, sideA, sideB, reasoning }, generatedAtMs);
   }
 
   return NextResponse.json({
@@ -116,12 +117,21 @@ Write one tight paragraph (max 90 words): which side you lean toward and your ho
     reasoning,
     paidTo: hasPass ? null : payTo,
     price: hasPass ? "$0 (pass)" : PRICES.councilReasoning,
+    freshness: reasoning === UNAVAILABLE_REASONING ? null : buildVSCacheFreshness({
+      updatedAtMs: generatedAtMs,
+      freshnessWindowMs: TTL_MS,
+      source: "contract",
+    }),
   });
 }
 
 // Dynamic payTo: each persona is paid into its own wallet. A council pass
-// bypasses the paywall entirely.
-export const GET = paidRoute("councilReasoning", handler, {
-  payTo: personaAddress,
-  skipPayment: hasCouncilPass,
-});
+// bypasses the paywall entirely. Wrapped so a pass-holder's read and a
+// paid read are both traceable — see docs/TRACE_CORRELATION.md.
+export const GET = tracedRoute(
+  "api.council.reasoning",
+  paidRoute("councilReasoning", handler, {
+    payTo: personaAddress,
+    skipPayment: hasCouncilPass,
+  }),
+);

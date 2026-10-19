@@ -1,0 +1,53 @@
+name: dependency-audit
+
+on:
+  schedule:
+    # Weekly, off the hour, so newly published advisories are triaged even
+    # when no pull request is open. Manual runs use workflow_dispatch.
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dependency-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Production dependency triage
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Read-only job. Leaving a token in .git/config would let an
+          # uploaded artifact carry a credential this workflow does not need.
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Audit production dependencies
+        run: |
+          set -uo pipefail
+          # npm audit exits 1 when any advisory exists; the checker is the
+          # fail-closed source of truth for high/critical/unknown findings.
+          npm audit --omit=dev --json > npm-audit.json || true
+          node --import tsx scripts/check-npm-audit.ts --json npm-audit.json --out npm-audit-report.md
+
+      - name: Upload dependency audit evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-audit-${{ github.run_id }}
+          path: |
+            npm-audit.json
+            npm-audit-report.md
+          if-no-files-found: error
+          retention-days: 14

@@ -33,15 +33,20 @@ export function requireAnyLLMKey(): void {
 /**
  * Serializes LLM calls: consecutive invocations of the returned gate are at
  * least `ms` apart, so a burst of claims doesn't trip free-tier RPM limits.
+ *
+ * The next slot is reserved synchronously on entry, so concurrent callers
+ * each receive a distinct slot instead of computing the same wait and rushing
+ * through together.
  */
 export function createThrottle(ms: number): () => Promise<void> {
-  let lastAt = 0;
+  let nextAt = 0;
   return async () => {
-    if (ms > 0) {
-      const wait = ms - (Date.now() - lastAt);
-      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-    }
-    lastAt = Date.now();
+    if (ms <= 0) return;
+    const now = Date.now();
+    const slot = Math.max(now, nextAt);
+    nextAt = slot + ms;
+    const wait = slot - now;
+    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
   };
 }
 

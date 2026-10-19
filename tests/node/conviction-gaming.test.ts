@@ -217,9 +217,10 @@ test("a genuine counterparty on a self-dealt claim still counts", () => {
   assert.equal(other.positions[0].outcome, "win");
 });
 
-test("a checksummed self-challenge is still caught", () => {
+test("a self-challenge with the exact creator address is caught", () => {
+  // Addresses compare exactly: a Stellar strkey is case-sensitive base32.
   const inputs = positionsFromProjection({
-    claims: [projected([{ address: SELF.toUpperCase(), stakeUnits: usdcToUnits(10) }])],
+    claims: [projected([{ address: SELF, stakeUnits: usdcToUnits(10) }])],
     creatorStakeUnitsFor: () => usdcToUnits(10),
     stakeToUsdc: unitsToUsdc,
   });

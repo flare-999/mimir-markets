@@ -76,6 +76,7 @@ export interface PersonaDecision {
     | "no-pool-imbalance"
     | "no-whale-yet"
     | "no-evidence"
+    | "stale-evidence"
     | "llm-failed";
 }
 
@@ -94,11 +95,31 @@ export interface PersonaRunnerContext {
   peerReasoning?:   Map<string, string[]>;
 }
 
+/**
+ * Represents a cached piece of evidence associated with a claim.
+ *
+ * Includes an integrity check mechanism via SHA-256 hashing to ensure
+ * the cached text has not been tampered with or corrupted since caching.
+ * This supports the "evidence-cache integrity check" feature requirement,
+ * ensuring contract-first, privacy-safe behavior at this boundary.
+ */
 export interface EvidenceCacheEntry {
   text:    string;
   fetcher: string;
-  /** SHA-256 of the text, bare hex. */
+  /** SHA-256 of the text, bare hex. Used for integrity verification. */
   hash:    string;
+  /**
+   * Optional timestamp of when this evidence was cached.
+   */
+  cachedAt?: number;
+  /**
+   * Epoch ms when the fetch completed.  Populated for all real fetches;
+   * absent (undefined) only for the "no URL / failed" placeholder entries so
+   * callers can distinguish "no-evidence" from "evidence that is stale".
+   */
+  fetchedAt?: number;
+  /** Normalised source URL after any redirects.  Absent for placeholder entries. */
+  sourceUrl?: string;
 }
 
 /**

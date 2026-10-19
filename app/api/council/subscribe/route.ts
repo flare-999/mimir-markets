@@ -14,7 +14,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { paidRoute, paymentPayer } from "@/lib/x402/server";
 import { PRICES } from "@/lib/x402/config";
-import { issuePass } from "@/lib/paid-pass";
+import { issuePass } from "@/lib/server/paid-pass";
 
 const PLAN = "council";
 const TTL_MS = Number(process.env.COUNCIL_PASS_TTL_MS ?? 10 * 60 * 1000);

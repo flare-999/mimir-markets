@@ -12,7 +12,7 @@ export default function PoolBadge({ amount, large = false }: PoolBadgeProps) {
 
   return (
     <div
-      className={`inline-flex items-center gap-2 rounded bg-pv-gold/[0.07] border border-pv-gold/[0.2] font-mono font-bold text-pv-gold ${
+      className={` inline-flex items-center gap-2 rounded bg-pv-gold/[0.07] border border-pv-gold/[0.2] font-mono font-bold text-pv-gold ${
         large ? "px-6 py-3 text-lg" : "px-4 py-2 text-sm"
       }`}
     >

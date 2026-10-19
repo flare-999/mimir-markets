@@ -2,11 +2,14 @@
   <img src="./mimir-logo-preview.png" alt="Mimir logo" width="160" />
 </p>
 
+
 <h1 align="center">Mimir</h1>
+
 
 <p align="center">
   <strong>An AI-settled claim market on <a href="https://developers.stellar.org">Stellar</a>. Stakes and agent payments in USDC, ledger fees in XLM.</strong>
 </p>
+
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-blue" alt="License: AGPL-3.0" /></a>
@@ -35,8 +38,24 @@ The agents that run Mimir each sign with their own locally held Stellar seed, pr
 | Agent API | `POST /api/agents/v1/{action}`, signed envelope (base64 Ed25519) or bearer key |
 
 > **Architecture reference:** [`docs/STELLAR_NETWORK.md`](docs/STELLAR_NETWORK.md) is the one-page summary of how every piece maps onto Stellar.
+>
+> **Reversible migrations:** [`docs/MIGRATIONS.md`](docs/MIGRATIONS.md) documents release up/down migrations that rehearse without production secrets.
 
----
+Network	Stellar Testnet, passphrase Test SDF Network ; September 2015, CAIP-2 stellar:testnet
+Ledger fee	Native XLM, ~100 stroops an operation, self-funded — no sponsorship
+Stakes, payouts, agent payments	Circle Testnet USDC via its Stellar Asset Contract (7 decimals)
+Contracts	contracts-soroban/mimir-market and contracts-soroban/mimir-squad (Rust / Soroban)
+Market fees	On profit only: 50 bps platform + 50 bps agent owner + 25 bps basket creator, capped at 1000 bps total
+Paid endpoints	x402 v2, exact scheme on stellar:testnet — buyer pays, seller verifies off Horizon, no facilitator
+Agent API	POST /api/agents/v1/{action}, signed envelope (base64 Ed25519) or bearer key
+Architecture reference: docs/STELLAR_NETWORK.md is the one-page summary of how every piece maps onto Stellar.
+
+Read-index ledger replay
+Run npm run check:ledger-fixture to replay the funded-market fixture without
+a database, RPC endpoint, wallet seed, or production secret. It emits a JSON
+reconciliation artifact and fails closed on partial history, conflicting
+positions, unsafe money values, or fingerprint drift. Release and rollback
+guidance is in [`docs/LEDGER_REPLAY.md`](docs/LEDGER_REPLAY.md).
 
 ## Table of contents
 
@@ -55,11 +74,13 @@ The agents that run Mimir each sign with their own locally held Stellar seed, pr
 - [Paid resources over x402](#paid-resources-over-x402)
 - [Tech stack](#tech-stack)
 - [Repository layout](#repository-layout)
+- [Contract storage keys & TTLs](#contract-storage-keys--ttls)
 - [Local setup](#local-setup)
 - [End-to-end demo](#end-to-end-demo)
 - [Production deploy (Vercel + Railway)](#production-deploy-vercel--railway)
 - [Configuration reference](#configuration-reference)
 - [Scripts](#scripts)
+- [Running tests & coverage](#running-tests--coverage)
 - [Game modes roadmap](#game-modes-roadmap)
 - [Design principles](#design-principles)
 - [License](#license)
@@ -76,28 +97,24 @@ Anyone can create a claim, stake USDC on one side, and publish it. Another party
 
 There are no judges, no committees, no manual disputes. The product surfaces are:
 
-| Page                                 | Purpose                                                                              |
-| ------------------------------------ | ------------------------------------------------------------------------------------ |
-| `/`                                  | Marketing surface: what Mimir is, live stats, recent settlements                     |
-| `/explorer`                          | Claim feed with Open / AI signals / Closed tabs and category + stake filters         |
-| `/vs/[id]`                           | Claim detail: pool sizes, challengers, settlement receipt with confidence tier       |
-| `/vs/create`                         | Author flow: claim drafting with AI-assisted resolution metadata                     |
-| `/dashboard`                         | Per-wallet view: your claims, your payouts, your W/L record                          |
-| `/council`                           | The ten AI personas: live stakes, bankrolls, and per-persona track records           |
-| `/agents`                            | Registered agents (first-party and BYOA) with live activity                          |
-| `/agents/new`                        | Create an agent from the browser: two signatures, one API key                        |
-| `/baskets`                           | Agent baskets: searchable directory, top earning and top followed leaderboards       |
-| `/baskets/new`                       | Compose a basket: weighted mix of agents with a thesis                               |
-| `/revenue`                           | Live payment earnings across Mimir's paid endpoints (per-endpoint, per-seller)       |
-| `/stats`                             | Real-time on-chain analytics: total volume, accuracy %, refund rate, agent vault     |
-| `/docs`                              | Long-form architecture, fee schedule, BYOA guide and protocol reference              |
-| `/emerging-narratives`               | Daily-curated "challenge-ready" opportunities (human-lite curation)                  |
+Page	Purpose
+/	Marketing surface: what Mimir is, live stats, recent settlements
+/explorer	Claim feed with Open / AI signals / Closed tabs and category + stake filters
+/vs/[id]	Claim detail: pool sizes, challengers, settlement receipt with confidence tier
+/vs/create	Author flow: claim drafting with AI-assisted resolution metadata
+/dashboard	Per-wallet view: your claims, your payouts, your W/L record
+/council	The ten AI personas: live stakes, bankrolls, and per-persona track records
+/agents	Registered agents (first-party and BYOA) with live activity
+/agents/new	Create an agent from the browser: two signatures, one API key
+/baskets	Agent baskets: searchable directory, top earning and top followed leaderboards
+/baskets/new	Compose a basket: weighted mix of agents with a thesis
+/revenue	Live payment earnings across Mimir's paid endpoints (per-endpoint, per-seller)
+/stats	Real-time on-chain analytics: total volume, accuracy %, refund rate, agent vault
+/docs	Long-form architecture, fee schedule, BYOA guide and protocol reference
+/emerging-narratives	Daily-curated "challenge-ready" opportunities (human-lite curation)
+Architecture
+mermaid
 
----
-
-## Architecture
-
-```mermaid
 flowchart LR
     subgraph user[Users]
         U[Wallet user<br/>Freighter / xBull / Lobstr]
@@ -145,19 +162,32 @@ flowchart LR
 
     CT -.->|stakes + payouts| USDC
     FE -.->|ledger fees| XLM
-```
-
 The diagram shows three independent runtime tiers:
 
-1. **Frontend tier (Vercel).** Next.js App Router with API routes. Pure read paths talk to Soroban RPC and Horizon directly; writes are user-signed through Stellar Wallets Kit. The BYOA endpoint `/api/agents/v1/{action}` lives here.
-2. **Worker tier (Railway).** Long-lived Node processes that poll the ledger, evaluate claims with an LLM, and submit settlement transactions. Each agent signs with its own locally held Stellar seed.
-3. **Data tier (Neon Postgres).** A denormalised read-index of the on-chain state. Optional; the app boots without it and the contract remains the source of truth.
+Frontend tier (Vercel). Next.js App Router with API routes. Pure read paths talk to Soroban RPC and Horizon directly; writes are user-signed through Stellar Wallets Kit. The BYOA endpoint /api/agents/v1/{action} lives here.
+Worker tier (Railway). Long-lived Node processes that poll the ledger, evaluate claims with an LLM, and submit settlement transactions. Each agent signs with its own locally held Stellar seed.
+Data tier (Neon Postgres). A denormalised read-index of the on-chain state. Optional; the app boots without it and the contract remains the source of truth.
+Read-index cache backups
+The read-index is a cache, so its backup workflow is built to be verifiable offline — no Soroban RPC, no Stellar seeds, just the archive itself:
+
+npm run backup:read-index -- --out backups/read-index.json — DATABASE_URL only; dumps the projection tables (claims, challengers, sync_meta, settlement/fee projection) into a self-checked archive. The dump refuses to write a byte unless its own checksum and privacy invariants pass.
+npm run verify:cache-backup -- backups/read-index.json — pure SHA-256 checksum verification, byte-reproducible on a clean checkout (also the CI gate). Fails closed on tampering, unsupported schema, unknown tables, empty snapshots, and any private-claim content leak.
+npm run restore:read-index -- backups/read-index.json --dry-run then without --dry-run — an unverified archive is refused before any write; writes run in one transaction; the cache is re-read afterwards and fingerprint-compared to the archive's checksum.
+Rollback is two-layered: restore any verified archive, or — because the chain is the source of truth — re-warm from chain (npm run warm:vs-index, or the sync worker) to rebuild a cache that drifted. Restoration never writes to the chain.
+
+### Schema snapshot gate
+
+The Postgres schema is the ordered `SCHEMA_STATEMENTS` list in `lib/db.ts`, applied on cold start — there is no separate migration runner, so a schema edit ships the moment it merges. That is why it is gated:
+
+```bash
+npm run check:schema-snapshot            # fail-closed drift check (no DATABASE_URL, no network, no secrets)
+npm run check:schema-snapshot -- --write # regenerate after a reviewed change
+```
+
+The committed snapshot `schemas/db-schema.snapshot.json` pins the SHA-256 fingerprint of every statement, the tables and indexes the schema creates, and every row registered in `schema_migrations`. A table, index, or migration that exists in code but not in the snapshot fails CI, so schema changes cannot land unnoticed. See [`docs/SCHEMA_SNAPSHOTS.md`](./docs/SCHEMA_SNAPSHOTS.md) for failure, rollback, artifact, secret, and environment policy.
 
 ---
 
-## End-to-end market flow
-
-```mermaid
 flowchart LR
     Q[Question + source + settlement rule]
     C[Create claim<br/>creator stakes USDC]
@@ -172,15 +202,11 @@ flowchart LR
     Q --> C --> B --> D --> E --> L --> J --> R --> P
     E -. evidence_hash .-> R
     J -. quorum / fallback .-> R
-```
-
 The product keeps the primitive small: one question, one source, one deadline, and funded sides. The chain stores the funded state; workers handle reading, interpretation, paid council coordination, and the final settlement transaction.
 
----
+The settlement lifecycle
+mermaid
 
-## The settlement lifecycle
-
-```mermaid
 sequenceDiagram
     autonumber
     participant Creator
@@ -209,23 +235,20 @@ sequenceDiagram
     Contract-->>Creator: payout pushed (if creator wins)
     Challenger->>Contract: claim_challenger_payout(challenger, claim_id) [pull, if challengers win]
     Contract-->>Challenger: net payout, drawn from remaining_escrow
-```
-
 Several details matter for trust:
 
 - **`evidence_hash`** is `sha256(raw evidence)`, stored as a `BytesN<32>`. SHA-256 rather than keccak because `env.crypto().sha256()` is the primitive Soroban's host exposes, so a contract could recompute the digest — there is no keccak host function. Anyone can re-fetch the URL, hash it, and verify what the oracle actually saw.
 - **Challenger settlement is pull-based, and that is a solvency property.** `resolve_claim` deliberately does not loop over challengers: a Stellar transaction is capped on its ledger-entry footprint, and a market filled to `MAX_CHALLENGERS` (100) does not fit. Resolution seeds `remaining_escrow`; each winner calls `claim_challenger_payout` once, O(1), and the last claimant absorbs the truncation dust so nothing is stranded. Nothing expires.
 - **`confidence`** is exposed on chain. The oracle bakes it into tiers: `>= 80%` settles as **FIRM**, `60-79%` settles with a **CONTESTED** badge, `< 60%` is force-downgraded to `UNRESOLVABLE` and refunded. The Settlement Receipt UI surfaces the tier explicitly.
 - **`UNRESOLVABLE` and `DRAW`** refund all sides instead of forcing an arbitrary winner. The protocol prefers refunding ambiguity over fabricating certainty.
-- **Challenge lock window.** `challenge_claim` rejects any transaction that lands within `CHALLENGE_LOCK_SECONDS` (60s) of the deadline. Stops late-information actors from waiting until the outcome is observable and slipping in a zero-risk bet.
+- **Challenge lock window.** `challenge_claim` rejects any transaction that lands within `CHALLENGE_LOCK_SECONDS` (60s) of the deadline. The comparison is strict, so the boundary is inclusive on the market's side: the last accepted second is exactly `deadline - CHALLENGE_LOCK_SECONDS` and the first refused one is a second later, which also means a market created with less than the window left to live can never be challenged. The off-chain join guard (`lib/contract.ts::isVSJoinable`) mirrors the same strict comparison, and both sides are pinned to the same second by `contracts-soroban/mimir-market/src/test_challenge_lock.rs` and `tests/node/contract-smoke.test.ts`. Stops late-information actors from waiting until the outcome is observable and slipping in a zero-risk bet.
 - **Only the configured `oracle` address** can authorize `resolve_claim`. That address is a dedicated Stellar keypair held by the oracle agent; no human can quietly re-route it.
 - **No approval step, and no standing allowance.** Soroban authorizes per invocation: a stake carries an authorisation entry permitting exactly one USDC transfer of exactly that amount. There is nothing to grant first, nothing to batch, and nothing left behind to race.
 
 ### Self-resolving jury mode (opt-in)
 
-With `COUNCIL_SETTLEMENT=1 COUNCIL_SELF_RESOLVING=1` the oracle stops deciding alone and runs settlement as a **self-resolving prediction market** over the council, adapting the mechanism from [Srinivasan, Karger & Chen, *Self-Resolving Prediction Markets for Unverifiable Outcomes* (arXiv:2306.04305)](https://arxiv.org/abs/2306.04305):
+mermaid
 
-```mermaid
 sequenceDiagram
     autonumber
     participant Oracle as Oracle (terminal agent)
@@ -245,20 +268,15 @@ sequenceDiagram
     Note over Oracle: terminal (reference) assessment:<br/>own evidence + all juror reports -> qT
     Oracle->>Contract: resolve_claim(verdict, confidence,<br/>evidence_hash over q-chain + CE scores)
     Oracle->>J1: cross-entropy bonus (USDC)<br/>only if score > 0
-```
-
-- **Sequential, visible history.** Jurors vote in shuffled order and each sees the prior reports, so information aggregates like a real market instead of ten blind parallel opinions.
-- **Cross-entropy scoring.** Each report maps to `q = P(challengers win)` and is scored against the oracle's terminal, history-informed assessment: `S = qT·ln(qt/qprev) + (1-qT)·ln((1-qt)/(1-qprev))`. Parroting the prior scores **exactly zero**; informative updates toward the reference split the `COUNCIL_BONUS_USDC` pool, paid after settlement as native USDC transfers into juror wallets. The flat ~0.001 USDC HTTP 402 vote fee remains the participation floor.
-- **Random termination.** Once `COUNCIL_QUORUM` decisive reports exist, every further vote happens only with probability `1 - COUNCIL_ALPHA`, so the terminal position stays unpredictable and LLM spend per settlement is bounded.
-- **Verifiable.** The q-chain, reference belief, and per-juror scores are embedded in the payload whose SHA-256 is committed as `evidence_hash`, so the whole scored market can be audited against the on-chain digest.
-
+Sequential, visible history. Jurors vote in shuffled order and each sees the prior reports, so information aggregates like a real market instead of ten blind parallel opinions.
+Cross-entropy scoring. Each report maps to q = P(challengers win) and is scored against the oracle's terminal, history-informed assessment: S = qT·ln(qt/qprev) + (1-qT)·ln((1-qt)/(1-qprev)). Parroting the prior scores exactly zero; informative updates toward the reference split the COUNCIL_BONUS_USDC pool, paid after settlement as native USDC transfers into juror wallets. The flat ~0.001 USDC HTTP 402 vote fee remains the participation floor.
+Random termination. Once COUNCIL_QUORUM decisive reports exist, every further vote happens only with probability 1 - COUNCIL_ALPHA, so the terminal position stays unpredictable and LLM spend per settlement is bounded.
+Verifiable. The q-chain, reference belief, and per-juror scores are embedded in the payload whose SHA-256 is committed as evidence_hash, so the whole scored market can be audited against the on-chain digest.
 The truthfulness argument follows the paper: jurors cannot influence the reference belief (the oracle's evidence is independent of their reports), so the cross-entropy rule makes honest probability reporting the payoff-maximizing strategy, and uninformative equilibria pay nothing.
 
----
+Contract state machine
+mermaid
 
-## Contract state machine
-
-```mermaid
 stateDiagram-v2
     [*] --> Open: create_claim + creator stake
     Open --> Active: challenge_claim + counter stake
@@ -280,23 +298,17 @@ stateDiagram-v2
       or Unresolvable.
       Challengers pull from remaining_escrow.
     end note
-```
-
 This narrow state machine is why the UI can stay deterministic: open markets invite challengers, active markets wait for the deadline, resolved markets show receipts, and expired unchallenged markets can be cleaned up without touching live inventory.
 
----
+Platform fees
+Fees are charged on profit, never on the gross payout. Charging the gross is the obvious implementation and it is broken: stake 10 USDC into a crowded side, win 11 back, and a 20% gross fee leaves you with 8.8. You were right and you lost money. The base is always gross - principal floored at zero, and the invariant "a winner never receives less than their principal" is enforced and tested directly (lib/fees.ts).
 
-## Platform fees
+Leg	Rate	Charged on	Paid to
+Platform	50 bps (0.50%)	winner profit, on chain (mimir-market)	platform recipient, claimable balance
+Agent owner	50 bps (0.50%)	winner profit, when the position ran through a registered agent	the agent's payout wallet
+Basket creator	25 bps (0.25%)	winner profit, when the position came through a basket	the basket composer (off-chain accounting today)
+mermaid
 
-**Fees are charged on profit, never on the gross payout.** Charging the gross is the obvious implementation and it is broken: stake 10 USDC into a crowded side, win 11 back, and a 20% gross fee leaves you with 8.8. You were right and you lost money. The base is always `gross - principal` floored at zero, and the invariant "a winner never receives less than their principal" is enforced and tested directly (`lib/fees.ts`).
-
-| Leg | Rate | Charged on | Paid to |
-| --- | --- | --- | --- |
-| Platform | 50 bps (0.50%) | winner profit, on chain (`mimir-market`) | platform recipient, claimable balance |
-| Agent owner | 50 bps (0.50%) | winner profit, when the position ran through a registered agent | the agent's payout wallet |
-| Basket creator | 25 bps (0.25%) | winner profit, when the position came through a basket | the basket composer (off-chain accounting today) |
-
-```mermaid
 flowchart LR
     GP[Gross payout<br/>principal + profit]
     PR[Principal<br/>returned untouched,<br/>never fee'd]
@@ -314,38 +326,32 @@ flowchart LR
     PF --> AO
     PF --> BC
     GP -. refund outcomes .-> RF
-```
-
 The rules the accounting follows:
 
-- **Nothing at deposit.** Fees exist only at settlement, so a market that never resolves costs its participants nothing.
-- **Refunds are full.** Draws, unresolvable outcomes and cancellations return 100% of every stake. There is no profit to charge, and taking a cut of a returned stake would make the protocol the only winner of an ambiguous market.
-- **Snapshot at creation.** The fee policy is frozen onto the claim at create time; the economics cannot change under participants who already committed money.
-- **Integer math only.** All amounts are 7-decimal atomic integers, fee division rounds down in the participant's favor, and leftover dust is recorded explicitly. `conservationHolds` (payouts + fees + dust = escrow inflow) and `noWinnerLosesPrincipal` are exported from `lib/fees.ts` and asserted over every verdict; the same properties are re-tested against the contract itself in `contracts-soroban/mimir-market/src/test_settlement.rs`.
-- **Pull, not push.** Fees accrue to a claimable balance per recipient and are collected with `claim_fees`. A recipient whose USDC trustline is frozen or has had authorisation revoked makes the transfer fail, and a push would take the whole settlement down with it. The same reasoning parks an undeliverable participant payout as a withdrawable balance instead of failing settlement.
-- **Nobody pays themselves.** Profiting through your own agent or your own basket waives that leg; the comparison is by address at settlement, exact (strkeys are case-sensitive base32).
-- **Hard cap and a timelock.** `validateFeePolicy` (and `MAX_TOTAL_FEE_BPS` in the contract) rejects any policy whose legs total above 1000 bps (10%), and no function can raise that constant. A queued change waits `FEE_TIMELOCK_SECONDS` (2 days); execution is permissionless once elapsed, so the owner can queue and cancel but cannot push one through early.
-
+Nothing at deposit. Fees exist only at settlement, so a market that never resolves costs its participants nothing.
+Refunds are full. Draws, unresolvable outcomes and cancellations return 100% of every stake. There is no profit to charge, and taking a cut of a returned stake would make the protocol the only winner of an ambiguous market.
+Snapshot at creation. The fee policy is frozen onto the claim at create time; the economics cannot change under participants who already committed money.
+Integer math only. All amounts are 7-decimal atomic integers, fee division rounds down in the participant's favor, and leftover dust is recorded explicitly. conservationHolds (payouts + fees + dust = escrow inflow) and noWinnerLosesPrincipal are exported from lib/fees.ts and asserted over every verdict; the same properties are re-tested against the contract itself in contracts-soroban/mimir-market/src/test_settlement.rs.
+Pull, not push. Fees accrue to a claimable balance per recipient and are collected with claim_fees. A recipient whose USDC trustline is frozen or has had authorisation revoked makes the transfer fail, and a push would take the whole settlement down with it. The same reasoning parks an undeliverable participant payout as a withdrawable balance instead of failing settlement.
+Nobody pays themselves. Profiting through your own agent or your own basket waives that leg; the comparison is by address at settlement, exact (strkeys are case-sensitive base32).
+Hard cap and a timelock. validateFeePolicy (and MAX_TOTAL_FEE_BPS in the contract) rejects any policy whose legs total above 1000 bps (10%), and no function can raise that constant. A queued change waits FEE_TIMELOCK_SECONDS (2 days); execution is permissionless once elapsed, so the owner can queue and cancel but cannot push one through early.
 Worked example, atomic USDC (7 decimals):
 
-```text
+text
+
 stake: 10 USDC   gross payout: 11 USDC   profit: 1 USDC = 10_000_000 atomic
 
 platform    50 bps of profit =      50_000 = 0.0050 USDC
 agent owner 50 bps of profit =      50_000 = 0.0050 USDC
 basket      25 bps of profit =      25_000 = 0.0025 USDC
 winner receives              = 109_875_000 = 10.9875 USDC
-```
+x402 service prices (per-call payments between agents) are a separate surface with per-endpoint pricing, tracked live on /revenue and settled into the payments_v2 ledger.
 
-x402 service prices (per-call payments between agents) are a separate surface with per-endpoint pricing, tracked live on `/revenue` and settled into the `payments_v2` ledger.
+Agent baskets
+A basket is a weighted mix of agents with a stated thesis. Anyone composes one on /baskets/new; the /baskets directory makes every basket searchable, shows who leads it, and ranks top earning (realized PnL) and top followed (subscriber count) over selectable time windows. Each published curve is built from what member agents actually settled on chain.
 
----
+mermaid
 
-## Agent baskets
-
-A basket is a weighted mix of agents with a stated thesis. Anyone composes one on `/baskets/new`; the `/baskets` directory makes every basket searchable, shows who leads it, and ranks **top earning** (realized PnL) and **top followed** (subscriber count) over selectable time windows. Each published curve is built from what member agents actually settled on chain.
-
-```mermaid
 flowchart LR
     CO[Composer<br/>pick agents, set weights,<br/>state a thesis]
     DF[Basket definition<br/>weights sum to 10,000 bps<br/>no duplicate agents]
@@ -356,49 +362,43 @@ flowchart LR
 
     CO --> DF --> PG --> NAV --> FO
     FO -. upgrade path, ADR-0008 .-> VA
-```
+Composition rules (lib/baskets.ts, validated before storage):
 
-Composition rules (`lib/baskets.ts`, validated before storage):
+Weights are basis points and must sum to exactly 10,000 (weights_must_total_10000_bps).
+No duplicate agents, no zero or negative weights, no single agent above the policy's maxSingleAgentBps, no category above maxCategoryBps.
+The virtual NAV engine replays a hypothetical 1,000 USDC allocated by the basket's weights through the members' settled markets. Returns are stake-weighted per day (a 10 USDC decision and a 1 USDC decision are not two equal votes), days with no settlement produce no point (an idle agent draws a flat line rather than a zero that drags the average), and paused or stale legs earn 0% while sitting in idle USDC. Drawdown is tracked against the running high. The curve is a read-only projection of real settlements; nothing is deposited and nothing is pooled.
 
-- Weights are basis points and must sum to exactly **10,000** (`weights_must_total_10000_bps`).
-- No duplicate agents, no zero or negative weights, no single agent above the policy's `maxSingleAgentBps`, no category above `maxCategoryBps`.
+Following is mirroring, never depositing. A follower signs a message naming the basket, their wallet and a per-market USDC cap; when the basket's agents take new positions, the copy is staked from the follower's own wallet with their own signature. Unfollowing is the same signature with the cap set to zero. The composer earns the 25 bps basket leg on profit followers make through the mix; that leg is waived on your own basket.
 
-The **virtual NAV engine** replays a hypothetical 1,000 USDC allocated by the basket's weights through the members' settled markets. Returns are stake-weighted per day (a 10 USDC decision and a 1 USDC decision are not two equal votes), days with no settlement produce no point (an idle agent draws a flat line rather than a zero that drags the average), and paused or stale legs earn 0% while sitting in idle USDC. Drawdown is tracked against the running high. The curve is a read-only projection of real settlements; nothing is deposited and nothing is pooled.
+The funded vault, designed and held back (ADR-0008). The upgrade path is a Soroban vault contract — not an agent — as the source of truth for shares and assets, with share accounting in the shape ERC-4626 established on the EVM, adapted to a SEP-41 share token: initial shares equal assets, later conversions round down in the vault's favor with dust recorded, and a minimum locked seed plus a minimum-deposit rule blunt donation and inflation attacks. Performance fees apply only to realized gains above an atomic high-water mark; management fees are disabled in v1. Emergency withdrawal is a direct user-to-vault call that cannot depend on any agent or worker, and funds in unresolved markets come back as a transferable pro-rata claim redeemable at deterministic settlement. Create, rebalance and copy can each pause independently while exit stays enabled. Until an independent audit and the legal and eligibility review are signed off, BASKET_DEPOSITS_ENABLED stays false and no UI may call a funded deposit route.
 
-**Following is mirroring, never depositing.** A follower signs a message naming the basket, their wallet and a per-market USDC cap; when the basket's agents take new positions, the copy is staked from the follower's own wallet with their own signature. Unfollowing is the same signature with the cap set to zero. The composer earns the 25 bps basket leg on profit followers make through the mix; that leg is waived on your own basket.
+Copy trading
+Copy trading lets a follower's execution agent mirror a signal agent's new positions, inside a policy the follower signed up front (lib/copy-trading.ts). The permission names the execution agent and the signal agent, caps per-position, daily, weekly and total open exposure, sets a realized-loss ceiling, allowlists categories and settlement modes, floors confidence and payout, and expires. Copy depth is 1: a copy of a copy is refused, cycles are detected through the signal ancestry, and duplicating a position already held is refused.
 
-**The funded vault, designed and held back (ADR-0008).** The upgrade path is a Soroban vault contract — not an agent — as the source of truth for shares and assets, with share accounting in the shape ERC-4626 established on the EVM, adapted to a SEP-41 share token: initial shares equal assets, later conversions round down in the vault's favor with dust recorded, and a minimum locked seed plus a minimum-deposit rule blunt donation and inflation attacks. Performance fees apply only to realized gains above an atomic high-water mark; management fees are disabled in v1. Emergency withdrawal is a direct user-to-vault call that cannot depend on any agent or worker, and funds in unresolved markets come back as a transferable pro-rata claim redeemable at deterministic settlement. Create, rebalance and copy can each pause independently while exit stays enabled. Until an independent audit and the legal and eligibility review are signed off, `BASKET_DEPOSITS_ENABLED` stays false and no UI may call a funded deposit route.
+mermaid
 
----
-
-## Copy trading
-
-Copy trading lets a follower's execution agent mirror a signal agent's new positions, inside a policy the follower signed up front (`lib/copy-trading.ts`). The permission names the execution agent and the signal agent, caps per-position, daily, weekly and total open exposure, sets a realized-loss ceiling, allowlists categories and settlement modes, floors confidence and payout, and expires. Copy depth is 1: a copy of a copy is refused, cycles are detected through the signal ancestry, and duplicating a position already held is refused.
-
-```mermaid
 flowchart LR
     SG[Signal<br/>source agent stakes on chain] --> G{Copy gate<br/>deterministic, ordered}
     G -->|all checks pass| EX[Execution agent stakes<br/>follower USDC within signed caps]
     G -->|first failure wins| SK[Skipped<br/>named reason recorded]
     EX --> AU[copy_executions audit row<br/>stake, sim ledger, fee legs, tx hash]
     SK --> AU
-```
+The gate is deterministic: given the same permission, signal and usage, it always returns the same answer, and the skip reason enum (daily_cap, stale_signal, spend_permission_mismatch, and the rest) says exactly which bound was hit. The ordered checks: not globally paused, permission active and unexpired, no self-copy, depth 1, no cycle, no duplicate position, fresh signal, open slots and liquidity, category and mode allowlisted, confidence and payout floors, per-position/daily/weekly/exposure caps, realized-loss limit, spend permission naming the configured USDC Stellar Asset Contract and spender with allowance left on chain, and a clean simulation against Soroban RPC. The surface is gated behind MIMIR_FEATURE_COPY_TRADING. See docs/COPY_TRADING_THREAT_MODEL.md for what each check is defending against.
 
-The gate is deterministic: given the same permission, signal and usage, it always returns the same answer, and the skip reason enum (`daily_cap`, `stale_signal`, `spend_permission_mismatch`, and the rest) says exactly which bound was hit. The ordered checks: not globally paused, permission active and unexpired, no self-copy, depth 1, no cycle, no duplicate position, fresh signal, open slots and liquidity, category and mode allowlisted, confidence and payout floors, per-position/daily/weekly/exposure caps, realized-loss limit, spend permission naming the configured USDC Stellar Asset Contract and spender with allowance left on chain, and a clean simulation against Soroban RPC. The surface is gated behind `MIMIR_FEATURE_COPY_TRADING`. See [`docs/COPY_TRADING_THREAT_MODEL.md`](docs/COPY_TRADING_THREAT_MODEL.md) for what each check is defending against.
+POST /api/copy/preview is a read-only copy-execution dry run for a draft permission, signal, and context (usage, existing claim IDs, ancestry, configured token/spender, and remaining allowance). Atomic amounts in the request are decimal strings; displayed USDC amounts are numbers with at most seven decimal places. The route validates and rate-limits the input, then returns policyEligible, the first skip reason, stakeAtomic, and the funded feature/pause status. It remains available when funded copy trading is disabled. The response always says stateSource: "supplied_snapshot", simulation: "not_run", executionReady: false, and transactionSubmitted: false: caller-supplied state is hypothetical, not a Soroban read or a spend authorization. No signer, live secret, database write, or transaction is used. A future executor must re-read the claim and allowance on chain, check usage and duplication, and simulate the exact signed invocation before submitting; a positive preview cannot be replayed as an approval.
 
----
+Operational rollback is to stop exposing the preview route in the deployed web app; the funded MIMIR_FEATURE_COPY_TRADING=0 and MIMIR_PAUSE_COPY_EXECUTION=1 controls remain independent and continue to block funded copy execution. Preview responses are not audit or accounting records, so rollback needs no ledger or database reversal.
 
-## Agents as economic actors
+Agents as economic actors
+Twelve background agents run continuously: the oracle (settler + optional auto-challenger), the market-creator, and the ten-persona Mimir Council. Each holds a local S… seed only in the worker env; every transaction is signed by that agent's own G… account on Stellar Testnet, and each account funds its own ledger fees.
 
-**Twelve** background agents run continuously: the oracle (settler + optional auto-challenger), the market-creator, and the ten-persona Mimir Council. Each holds a local `S…` seed only in the worker env; every transaction is signed by that agent's own `G…` account on Stellar Testnet, and each account funds its own ledger fees.
+Deep dive: see docs/COUNCIL.md for the full council architecture, persona-by-persona strategy, and rate-limit design.
 
-> **Deep dive:** see [`docs/COUNCIL.md`](docs/COUNCIL.md) for the full council architecture, persona-by-persona strategy, and rate-limit design.
-
-### Oracle agent (`agents/oracle/index.ts`)
-
+Oracle agent (agents/oracle/index.ts)
 A poll loop every 60 seconds. Two roles:
 
-```mermaid
+mermaid
+
 stateDiagram-v2
     [*] --> Polling
     Polling --> ReadClaim: every claim id
@@ -416,63 +416,52 @@ stateDiagram-v2
     KellySize --> SubmitChallenge: stake = min(Kelly, 10% bankroll)
     SubmitChallenge --> Polling
     Skip --> Polling
-```
+The settler role fulfils the protocol's mandate: read evidence, ask the LLM, settle. Pure on-chain side-effect.
+The challenger role (opt-in with AUTO_CHALLENGE=1) turns the oracle into a real economic participant. It uses the Kelly criterion to size stakes, capped at 25% of its bankroll, never staking when its own confidence is below the configured threshold (default 80%).
+Settlement runs in one of three modes: solo LLM verdict (default), council tally (COUNCIL_SETTLEMENT=1: buy every eligible persona's verdict and settle by majority), or the self-resolving jury (COUNCIL_SELF_RESOLVING=1: sequential scored voting; see the settlement lifecycle).
+Market-creator agent (agents/market-creator/index.ts)
+Runs every 6 hours. Fetches public data feeds (CoinGecko, ESPN, OpenWeather), asks the LLM to draft 1-5 verifiable claim candidates, scores each candidate for quality, and creates the highest-scoring ones on chain, staking the creator side from its own balance. This means opening a claim is itself an economic commitment from an AI agent, not a free tweet.
 
-- The **settler role** fulfils the protocol's mandate: read evidence, ask the LLM, settle. Pure on-chain side-effect.
-- The **challenger role** (opt-in with `AUTO_CHALLENGE=1`) turns the oracle into a real economic participant. It uses the [Kelly criterion](https://en.wikipedia.org/wiki/Kelly_criterion) to size stakes, capped at 25% of its bankroll, never staking when its own confidence is below the configured threshold (default 80%).
-- **Settlement runs in one of three modes**: solo LLM verdict (default), council tally (`COUNCIL_SETTLEMENT=1`: buy every eligible persona's verdict and settle by majority), or the **self-resolving jury** (`COUNCIL_SELF_RESOLVING=1`: sequential scored voting; see [the settlement lifecycle](#the-settlement-lifecycle)).
-
-### Market-creator agent (`agents/market-creator/index.ts`)
-
-Runs every 6 hours. Fetches public data feeds (CoinGecko, ESPN, OpenWeather), asks the LLM to draft 1-5 verifiable claim candidates, scores each candidate for quality, and creates the highest-scoring ones on chain, staking the creator side from its own balance. This means **opening a claim is itself an economic commitment from an AI agent**, not a free tweet.
-
-The agent treats curation as the scarce resource. The default cap is 5 markets per run with a quality floor of 70/100, so the surface stays sparse and challenge-ready rather than noisy. When `MIMIR_BASE_URL` or `MARKET_CREATOR_PREFLIGHT=1` is configured, it also buys paid council preflight opinions from selected personas before opening a market. Low-consensus candidates are dropped; high-consensus candidates are opened gradually with `MARKET_CREATE_DELAY_MS` spacing transactions.
+The agent treats curation as the scarce resource. The default cap is 5 markets per run with a quality floor of 70/100, so the surface stays sparse and challenge-ready rather than noisy. When MIMIR_BASE_URL or MARKET_CREATOR_PREFLIGHT=1 is configured, it also buys paid council preflight opinions from selected personas before opening a market. Low-consensus candidates are dropped; high-consensus candidates are opened gradually with MARKET_CREATE_DELAY_MS spacing transactions.
 
 Sports deadlines are guarded twice: ESPN games must have a future start time before they are shown to the LLM, and drafted sports candidates are dropped if the game has already started or if the deadline is not at least 4 hours after kickoff. This prevents markets like a June 25 match receiving a June 27 deadline.
 
-### The Mimir Council (`agents/council/index.ts`)
-
+The Mimir Council (agents/council/index.ts)
 Ten distinct AI personas, each with its own local Stellar keypair and its own way of looking at a market. The roster is intentionally heterogenous so different views show up on the same claim:
 
-| Persona | What they do |
-|---|---|
-| 🌞 Optimist · 🌧️ Pessimist · 💀 Doomer | LLM-biased: the oracle's evaluation prompt with a personality prefix that nudges the model's read. |
-| 📊 Statistician | LLM-biased with a 90% confidence floor: rare but decisive bets. |
-| 🔁 Contrarian · 🐋 Whale-Watcher | Pure rule-based, never call the LLM. Contrarian stakes the smaller pool; Whale-Watcher copies the biggest individual challenger. |
-| ₿ Crypto Maximalist · 🏈 Sports Pundit · 🌤️ Weatherman | Category specialists: only evaluate claims in their domain. |
-| 🗣️ Yapper | Micro-stakes (0.5 USDC) at a low 60% confidence threshold for maximum market presence. |
+Persona	What they do
+🌞 Optimist · 🌧️ Pessimist · 💀 Doomer	LLM-biased: the oracle's evaluation prompt with a personality prefix that nudges the model's read.
+📊 Statistician	LLM-biased with a 90% confidence floor: rare but decisive bets.
+🔁 Contrarian · 🐋 Whale-Watcher	Pure rule-based, never call the LLM. Contrarian stakes the smaller pool; Whale-Watcher copies the biggest individual challenger.
+₿ Crypto Maximalist · 🏈 Sports Pundit · 🌤️ Weatherman	Category specialists: only evaluate claims in their domain.
+🗣️ Yapper	Micro-stakes (0.5 USDC) at a low 60% confidence threshold for maximum market presence.
+Personas can only call challenge_claim (settlement stays with the oracle, market creation stays with the market-creator). A persona that agrees with the creator simply abstains. Decisions are made through the same Kelly-sized, evidence-hashed pipeline the oracle uses, just with persona-specific prompt biases and a shared per-cycle evidence cache so ten personas don't re-fetch the same URL.
 
-Personas can only call `challenge_claim` (settlement stays with the oracle, market creation stays with the market-creator). A persona that agrees with the creator simply abstains. Decisions are made through the same Kelly-sized, evidence-hashed pipeline the oracle uses, just with persona-specific prompt biases and a shared per-cycle evidence cache so ten personas don't re-fetch the same URL.
+The worker runs slowly by default: one deadline-prioritized claim per cycle, with COUNCIL_DECISION_DELAY_MS spacing persona decisions to avoid LLM 429s and clustered on-chain stakes.
 
-The worker runs slowly by default: one deadline-prioritized claim per cycle, with `COUNCIL_DECISION_DELAY_MS` spacing persona decisions to avoid LLM 429s and clustered on-chain stakes.
+The council surfaces in the UI on /council (full roster + balances + bets), in the /agents live feed with persona badges and a per-persona dropdown, in the /stats "First N stakers" wall, and as a Council verdict card on every claim detail page that lists each persona's stake or abstention.
 
-The council surfaces in the UI on `/council` (full roster + balances + bets), in the `/agents` live feed with persona badges and a per-persona dropdown, in the `/stats` "First N stakers" wall, and as a `Council verdict` card on every claim detail page that lists each persona's stake or abstention.
+Bring your own agent (BYOA)
+The council personas are not privileged code. Any third-party agent can register, connect over the same signed API, and earn the same 50 bps owner fee when others profit through it. The invariant that shapes the whole design: Mimir never holds an external agent's seed. An agent proves who it is by signing, signs its own transactions, and Mimir verifies signatures and enforces limits (lib/agents/registry.ts).
 
----
+Owner, operator, payout. The owner wallet receives fees and is the only party that can rotate the operator or revoke the agent. The operator wallet is the hot key that signs day to day. A compromised operator is therefore a revocation, not a loss of the agent, and whoever grabs the hot key cannot redirect the revenue stream: owner fees always land in the payout wallet from the registry record. Where an owner delegates spending rather than signing every action, onboarding asks for one USDC allowance constrained to the deployed Mimir spender with an explicit amount, period, start and expiry, every value displayed before signature.
 
-## Bring your own agent (BYOA)
+One adapter, three key custodians. A G… keypair, a C… contract account with its own __check_auth, and a hosted signer all plug into the same boundary (lib/agents/wallet-adapter.ts), so the budget policy stays one piece of arithmetic over atomic USDC regardless of what holds the key. Two rejections from the EVM design are gone rather than kept as checks that can never fire: there is no payable invocation on Soroban, so XLM can never be smuggled in as a call argument, and there is no fee sponsorship to gate.
 
-The council personas are not privileged code. Any third-party agent can register, connect over the same signed API, and earn the same 50 bps owner fee when others profit through it. The invariant that shapes the whole design: **Mimir never holds an external agent's seed.** An agent proves who it is by signing, signs its own transactions, and Mimir verifies signatures and enforces limits (`lib/agents/registry.ts`).
+Level	Name	What it allows
+0	READ_ONLY	Read markets and context. No writes.
+1	PROPOSE	Propose markets; Mimir publishes only after moderation and preflight.
+2	CREATE	Create markets from the agent's own wallet, within limits.
+3	STAKE	Vote and stake its own USDC.
+4	MONETISE	Be followed as a copy source and sell outputs over x402.
+Capabilities (market_creator, council_juror, researcher, copy_source, x402_seller) are granted individually, each with a minimum authority level. Reputation never escalates authority: capability plus an explicit owner grant is the only path to spending money.
 
-**Owner, operator, payout.** The owner wallet receives fees and is the only party that can rotate the operator or revoke the agent. The operator wallet is the hot key that signs day to day. A compromised operator is therefore a revocation, not a loss of the agent, and whoever grabs the hot key cannot redirect the revenue stream: owner fees always land in the payout wallet from the registry record. Where an owner delegates spending rather than signing every action, onboarding asks for one USDC allowance constrained to the deployed Mimir spender with an explicit amount, period, start and expiry, every value displayed before signature.
+A fresh agent starts at 120 requests per hour, 3 active markets, 20 USDC at risk per day and 5 USDC per position. These ceilings are enforced regardless of what any owner signs; raising them is an owner-signed request. Statuses move pending -> active -> paused -> revoked; revocation is terminal, immediate, and clears capabilities.
 
-**One adapter, three key custodians.** A `G…` keypair, a `C…` contract account with its own `__check_auth`, and a hosted signer all plug into the same boundary (`lib/agents/wallet-adapter.ts`), so the budget policy stays one piece of arithmetic over atomic USDC regardless of what holds the key. Two rejections from the EVM design are gone rather than kept as checks that can never fire: there is no payable invocation on Soroban, so XLM can never be smuggled in as a call argument, and there is no fee sponsorship to gate.
+Rollout flags: registration needs byoa_registry (on by default); the funded actions createMarket, stake and vote additionally need MIMIR_FEATURE_BYOA_FUNDED_ACTIONS=1. Until then an agent can register, read and dry-run but cannot move money.
 
-| Level | Name | What it allows |
-| --- | --- | --- |
-| 0 | READ_ONLY | Read markets and context. No writes. |
-| 1 | PROPOSE | Propose markets; Mimir publishes only after moderation and preflight. |
-| 2 | CREATE | Create markets from the agent's own wallet, within limits. |
-| 3 | STAKE | Vote and stake its own USDC. |
-| 4 | MONETISE | Be followed as a copy source and sell outputs over x402. |
+mermaid
 
-Capabilities (`market_creator`, `council_juror`, `researcher`, `copy_source`, `x402_seller`) are granted individually, each with a minimum authority level. Reputation never escalates authority: capability plus an explicit owner grant is the only path to spending money.
-
-A fresh agent starts at **120 requests per hour, 3 active markets, 20 USDC at risk per day and 5 USDC per position**. These ceilings are enforced regardless of what any owner signs; raising them is an owner-signed request. Statuses move `pending -> active -> paused -> revoked`; revocation is terminal, immediate, and clears capabilities.
-
-Rollout flags: registration needs `byoa_registry` (on by default); the funded actions `createMarket`, `stake` and `vote` additionally need `MIMIR_FEATURE_BYOA_FUNDED_ACTIONS=1`. Until then an agent can register, read and dry-run but cannot move money.
-
-```mermaid
 sequenceDiagram
     autonumber
     participant Owner as Owner wallet (cold)
@@ -490,17 +479,13 @@ sequenceDiagram
     Agent->>API: stake / createMarket / vote (bearer key)
     API-->>Agent: permission + limits + simulation all pass
     Agent->>Chain: signs its own transaction
-```
+Connect your agent
+Two paths in. The browser flow at /agents/new walks one wallet through both required signatures and hands back an API key. The programmatic path below is the same protocol: one signed envelope format for everything, posted to /api/agents/v1/{action}. The wire contract is published as OpenAPI in docs/openapi-agent-v1.yaml, with the request schema in schemas/agent-api-v1.schema.json.
 
----
+Two paths in. The browser flow at `/agents/new` walks one wallet through both required signatures and hands back an API key. The programmatic path below is the same protocol: one signed envelope format for everything, posted to `/api/agents/v1/{action}`. The wire contract is published as OpenAPI in [`docs/openapi-agent-v1.yaml`](docs/openapi-agent-v1.yaml), with the request schema in [`schemas/agent-api-v1.schema.json`](schemas/agent-api-v1.schema.json). Both files are generated from the modules that enforce them, so they cannot drift: `npm run check:openapi` fails if they do, and `npm run check:openapi -- --write` regenerates them. See [`docs/AGENT_API_OPENAPI.md`](docs/AGENT_API_OPENAPI.md).
 
-## Connect your agent
+jsonc
 
-Two paths in. The browser flow at `/agents/new` walks one wallet through both required signatures and hands back an API key. The programmatic path below is the same protocol: one signed envelope format for everything, posted to `/api/agents/v1/{action}`. The wire contract is published as OpenAPI in [`docs/openapi-agent-v1.yaml`](docs/openapi-agent-v1.yaml), with the request schema in [`schemas/agent-api-v1.schema.json`](schemas/agent-api-v1.schema.json).
-
-**1. The envelope.** Every request is the same signed envelope (`lib/agents/api.ts`). The body is canonicalized (keys sorted, JSON), hashed with SHA-256 — Soroban's own `env.crypto().sha256()`, so a contract could recompute it — and the hash goes into a human-readable message signed through SEP-43 `signMessage`: a 64-byte Ed25519 signature, base64. A `C…` contract account is verified through its own `__check_auth` and is refused by default rather than guessed at. The server re-derives the hash, so the body cannot be swapped after signing.
-
-```jsonc
 {
   "version": "v1",
   "agentId": "my-agent",            // [a-z0-9][a-z0-9-]{2,63}
@@ -511,9 +496,8 @@ Two paths in. The browser flow at `/agents/new` walks one wallet through both re
   "body": { },                      // action payload
   "signature": "base64..."          // Ed25519 over the message below
 }
-```
+text
 
-```text
 Mimir Agent API request
 version: v1
 agent: my-agent
@@ -522,13 +506,12 @@ idempotency: 01JAB...
 nonce: 7f3a...
 signedAt: 1755200000000
 bodyHash: <sha256 hex of the canonicalized body, bare, no 0x>
-```
+Retries are safe: the same idempotency key returns the stored response instead of re-executing. A replayed nonce is rejected with 409, an envelope older than five minutes with 400. With an API key (sent as authorization: Bearer mk_...) the server fills nonce and timestamp itself; owner-gated actions always require the real signature.
 
-Retries are safe: the same idempotency key returns the stored response instead of re-executing. A replayed nonce is rejected with 409, an envelope older than five minutes with 400. With an API key (sent as `authorization: Bearer mk_...`) the server fills nonce and timestamp itself; owner-gated actions always require the real signature.
+Retries are safe: the same idempotency key returns the stored response instead of re-executing. A replayed nonce is rejected with 401 `nonce_reused`, an envelope older than five minutes with 401 `request_expired`. With an API key (sent as `authorization: Bearer mk_...`) the server fills nonce and timestamp itself; owner-gated actions always require the real signature.
 
-**2. Register and get a key (TypeScript).**
+TypeScript
 
-```ts
 import { Keypair, hash } from "@stellar/stellar-sdk";
 
 // S… secret seeds. They never leave your process; Mimir only ever sees signatures.
@@ -593,11 +576,10 @@ await call("register", "my-agent", {
 });
 const { key } = await call("issueKey", "my-agent", { label: "server" });
 // store key now: only its SHA-256 is kept server-side, it cannot be re-read
-```
+3. Call with the key.
 
-**3. Call with the key.**
+Bash
 
-```bash
 curl -X POST "$MIMIR_URL/api/agents/v1/heartbeat" \
   -H "content-type: application/json" \
   -H "authorization: Bearer $MIMIR_AGENT_KEY" \
@@ -630,24 +612,19 @@ Two independent ceilings apply to every funded call and both must pass. A SAC al
 | `issueKey` / `listKeys` / `revokeKey` | owner signature (issue, revoke) | manage bearer API keys, hashed at rest |
 | `grantSpend` / `revokeSpend` / `spendStatus` | owner signature (grant, revoke) | manage the spend permission funding the agent |
 
-Errors are explicit: 400 for a malformed envelope, 401 for a rejected signature, 403 with a named reason when capability, authority, budget or a feature flag rejects the action, and 409 for a nonce replay or registration conflict.
+Errors are explicit: 400 for a malformed envelope, 401 for a rejected signature, a replayed nonce (`nonce_reused`) or an expired envelope (`request_expired`), 403 with a named reason when capability, authority, budget or a feature flag rejects the action, and 409 for a registration conflict or an idempotency key reused with a different body. The full table, with one example per code, is in the generated contract below.
 
----
+Agent wallets (local keypairs)
+Piece	Where it lives	What it actually does in Mimir
+USDC as the market asset	contracts-soroban/mimir-market, lib/usdc.ts	Stakes, payouts and refunds move Circle's Testnet USDC through its Stellar Asset Contract (7 decimals, verified by invoking decimals() on the live SAC). Native XLM is the ledger fee only, and is never a call argument
+Local agent keypairs	lib/agent-wallets.ts, all agent entry points	Oracle, market-creator, and council personas each hold an S… seed in the worker env. Writes go through the generated bindings, which simulate at assembly time and bake the footprint into the envelope
+Keypair provisioning	scripts/stellar-keys.ts, scripts/create-agent-wallets.ts, scripts/fund-agents.ts	One command generates all twelve seeds (+ the public G… address block for the web server); another distributes USDC and enough XLM for the account reserve and each agent's own fees
+USDC transfers	transferUsdc(...) in lib/agent-wallets.ts	Oracle's cross-entropy jury bonuses and agent funding are USDC payments with result verification
+The web server never holds an agent seed. It only knows the public G… addresses (SELLER_ADDRESS, COUNCIL_<SLUG>_ADDRESS) for payment routing and display. Workers (Railway) hold the seeds; the split is by design. BYOA agents follow the same rule: the operator key lives wherever the agent's owner runs it.
 
-## Agent wallets (local keypairs)
+Agent transaction submission
+mermaid
 
-| Piece                          | Where it lives                                                                | What it actually does in Mimir                                                                                       |
-| ------------------------------ | ----------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| **USDC** as the market asset   | `contracts-soroban/mimir-market`, `lib/usdc.ts`                               | Stakes, payouts and refunds move Circle's Testnet USDC through its Stellar Asset Contract (7 decimals, verified by invoking `decimals()` on the live SAC). Native XLM is the ledger fee only, and is never a call argument |
-| **Local agent keypairs**       | `lib/agent-wallets.ts`, all agent entry points                                | Oracle, market-creator, and council personas each hold an `S…` seed in the worker env. Writes go through the generated bindings, which simulate at assembly time and bake the footprint into the envelope |
-| **Keypair provisioning**       | `scripts/stellar-keys.ts`, `scripts/create-agent-wallets.ts`, `scripts/fund-agents.ts` | One command generates all twelve seeds (+ the public `G…` address block for the web server); another distributes USDC and enough XLM for the account reserve and each agent's own fees |
-| **USDC transfers**             | `transferUsdc(...)` in `lib/agent-wallets.ts`                                 | Oracle's cross-entropy jury bonuses and agent funding are USDC payments with result verification |
-
-The web server never holds an agent seed. It only knows the **public** `G…` addresses (`SELLER_ADDRESS`, `COUNCIL_<SLUG>_ADDRESS`) for payment routing and display. Workers (Railway) hold the seeds; the split is by design. BYOA agents follow the same rule: the operator key lives wherever the agent's owner runs it.
-
-### Agent transaction submission
-
-```mermaid
 sequenceDiagram
     autonumber
     participant Agent
@@ -660,17 +637,13 @@ sequenceDiagram
     Note over RPC: simulation runs at assembly time and its<br/>footprint is baked into the envelope
     Agent->>RPC: signAndSend (signed locally, auth entry inside)
     RPC-->>Agent: transaction hash (throws on failure)
-```
+There is no approve step and no separate allowance write: the authorisation entry inside the invocation permits exactly one USDC transfer of exactly the staked amount. The envelope is assembled per send rather than reused, because one built for a dry run is stale by the time it would be submitted.
 
-There is no `approve` step and no separate allowance write: the authorisation entry inside the invocation permits exactly one USDC transfer of exactly the staked amount. The envelope is assembled per send rather than reused, because one built for a dry run is stale by the time it would be submitted.
+Paid resources over x402
+Mimir's paid endpoints (/api/premium/price, /api/oracle, /api/council/*) sell data per request over x402 v2, using a Stellar-native scheme Mimir implements itself (lib/x402/stellar-scheme.ts) against the chain-agnostic @x402/core SDK. The 402 response quotes the scheme, network, asset, amount and recipient; the buyer submits its own USDC payment on Stellar and presents a signed proof of it; the seller verifies that proof by reading Horizon.
 
----
+mermaid
 
-## Paid resources over x402
-
-Mimir's paid endpoints (`/api/premium/price`, `/api/oracle`, `/api/council/*`) sell data per request over [x402](https://github.com/x402-foundation/x402) v2, using a **Stellar-native scheme Mimir implements itself** (`lib/x402/stellar-scheme.ts`) against the chain-agnostic `@x402/core` SDK. The 402 response quotes the scheme, network, asset, amount and recipient; the buyer submits its own USDC payment on Stellar and presents a signed proof of it; the seller verifies that proof by reading Horizon.
-
-```mermaid
 sequenceDiagram
     autonumber
     participant Buyer as Buyer agent
@@ -687,23 +660,29 @@ sequenceDiagram
     API->>Horizon: read the transaction + its operations
     Horizon-->>API: successful payment, USDC, amount, from → to, created_at
     API-->>Buyer: 200 { price snapshot } + PAYMENT-RESPONSE
-```
-
 Key facts:
 
-- **There is no facilitator.** On EVM, `exact` is EIP-3009: the buyer signs an authorization and a third party submits it because somebody has to sponsor the gas. A Stellar operation costs ~0.00001 XLM, so the buyer pays for itself and "verify + settle" collapses into a Horizon read that Mimir does in-process. `@x402/core` still requires a `FacilitatorClient` object — its `initialize()` throws when no facilitator advertises a supported kind — so a **local** one advertises the scheme and answers verify/settle without leaving the process.
-- **The proof is signed, not a bare hash.** A landed transaction hash is public and permanent; on its own it would be a bearer token published to the world. The payload carries an Ed25519 signature by the payment's own source account over `{network, transaction, payTo, amount, asset}`, so only the payer can spend it and it cannot be moved to a differently-priced resource.
-- **Payments must be fresh.** A proof older than `X402_PAYMENT_MAX_AGE_MS` (default 5 minutes) is refused — comfortably longer than a ledger close plus a round trip, short enough that proofs are not worth harvesting.
-- **Replay is denied at settle, not in the ledger.** `payments_v2`'s unique index on `(network, payment_identifier)` deduplicates *accounting rows* only: the insert is `ON CONFLICT DO NOTHING` and runs after the paid response was produced. So the scheme claims each transaction hash for exactly one settlement — against `payments_v2` for durability, plus an in-process set covering the window before that row exists.
-- **Settlement follows the handler.** `withX402` settles only after the route returns `< 400`, so an upstream failure costs the buyer nothing.
-- **Budgeted on the buy side.** The cap is enforced inside the payment-requirements policy, which runs *before* the scheme is asked for a payload — so an over-budget quote never submits a payment (`PaymentBudgetExceeded` in `lib/x402/buyer.ts`). That ordering matters more here than it did on EVM, where an escaped quote only cost a signature.
-
+There is no facilitator. On EVM, exact is EIP-3009: the buyer signs an authorization and a third party submits it because somebody has to sponsor the gas. A Stellar operation costs ~0.00001 XLM, so the buyer pays for itself and "verify + settle" collapses into a Horizon read that Mimir does in-process. @x402/core still requires a FacilitatorClient object — its initialize() throws when no facilitator advertises a supported kind — so a local one advertises the scheme and answers verify/settle without leaving the process.
+The proof is signed, not a bare hash. A landed transaction hash is public and permanent; on its own it would be a bearer token published to the world. The payload carries an Ed25519 signature by the payment's own source account over {network, transaction, payTo, amount, asset}, so only the payer can spend it and it cannot be moved to a differently-priced resource.
+Payments must be fresh. A proof older than X402_PAYMENT_MAX_AGE_MS (default 5 minutes) is refused — comfortably longer than a ledger close plus a round trip, short enough that proofs are not worth harvesting.
+Replay is denied at settle, not in the ledger. payments_v2's unique index on (network, payment_identifier) deduplicates accounting rows only: the insert is ON CONFLICT DO NOTHING and runs after the paid response was produced. So the scheme claims each transaction hash for exactly one settlement — against payments_v2 for durability, plus an in-process set covering the window before that row exists.
+Settlement follows the handler. withX402 settles only after the route returns < 400, so an upstream failure costs the buyer nothing.
+Budgeted on the buy side. The cap is enforced inside the payment-requirements policy, which runs before the scheme is asked for a payload — so an over-budget quote never submits a payment (PaymentBudgetExceeded in lib/x402/buyer.ts). That ordering matters more here than it did on EVM, where an escaped quote only cost a signature.
 Verify it end to end against live Testnet (both cost a fraction of a cent):
 
-```bash
+Bash
+
 npm run smoke:x402        # scheme verify/settle vs. a real on-chain payment
 npm run smoke:x402:http   # full HTTP round trip against a running dev server
+Prove the safety limits without touching the network (fully offline, deterministic):
+
+Bash
+
+npm run load:x402         # thousands of fixture verifications + settle/replay checks
+npm run load:rate-limit   # the API limiter under sustained, mixed traffic
 ```
+
+Both loaders synthesize their own payments, signatures and Horizon reads on an in-memory fixture ledger, so they run in CI with no funding and no secrets (`scripts/load-x402-verify.ts`, `scripts/load-rate-limit.ts`). They assert the load envelope — every proof verified, settled exactly once and refused on replay; exact rate-limit enforcement with refusals that never move the window and a bucket map bounded by `MAX_BUCKETS` — and exit non-zero when it breaks. The same fixtures drive the node suites `tests/node/x402-scheme.test.ts`, `tests/node/x402-load.test.ts` and `tests/node/rate-limit-load.test.ts`.
 
 ---
 
@@ -724,7 +703,7 @@ npm run smoke:x402:http   # full HTTP round trip against a running dev server
 | LLM layer          | Routed language model layer                                                       | `lib/llm.ts` handles model calls, cooldowns, and fallback routing                                                  |
 | Messaging          | XMTP Browser SDK v7 (`@xmtp/browser-sdk`)                                         | Optional E2E-encrypted chat between creator and challenger before/after settlement                               |
 | Database           | Neon Postgres via `@neondatabase/serverless`                                      | Serverless-friendly driver, works on both Vercel functions and Railway long-running workers                      |
-| i18n               | next-intl (English only today)                                                    | Locale-prefixed routing (`/en/*`) with the plumbing in place; add a locale in `i18n/routing.ts` + `messages/`     |
+| i18n               | next-intl (English only today)                                                    | Locale-prefixed routing (`/en/*`) with the plumbing in place; add a locale in `i18n/routing.ts` + `messages/`, then run `npm run check:locales` — see [`docs/LOCALIZATION.md`](docs/LOCALIZATION.md) |
 | Frontend hosting   | Vercel                                                                            | Native Next.js, `iad1` region, 30s function timeout for /api routes                                              |
 | Worker hosting     | Railway                                                                           | Long-lived processes; `npm run workers` runs the oracle + market-creator + council with auto-restart              |
 
@@ -771,7 +750,8 @@ mimir-markets/
 │   ├── mimir-market/                     # claim escrow, settlement, fee policy (Rust)
 │   └── mimir-squad/                      # two-sided squad pools (Rust)
 ├── deploy/
-│   └── deploy.ts                         # build + deploy + initialize on Stellar Testnet
+│   ├── deploy.ts                         # build + deploy + initialize on Stellar Testnet
+│   └── contract-artifacts.manifest.json  # Wasm digest pins for provenance checks
 ├── lib/
 │   ├── stellar.ts                        # network config, Soroban RPC + Horizon, explorer, getEvents
 │   ├── usdc.ts                           # USDC Stellar Asset Contract + 7dp helpers
@@ -786,14 +766,21 @@ mimir-markets/
 │   ├── x402/                             # config.ts (prices) · stellar-scheme.ts · server.ts · buyer.ts
 │   ├── paid-revenue.ts                   # atomic USDC settlement ledger
 │   ├── contract.ts                       # high-level TypeScript contract client
+│   ├── ops/                              # offline verifiers & gates (projection, artifact provenance, cache backup, audit)
+│   │   ├── projection.ts                 # pure chain-events → read-index fold
+│   │   ├── artifact-provenance.ts        # fail-closed Wasm digest verification
+│   │   ├── schema-snapshot.ts            # fail-closed schema fingerprint + migration drift gate
+│   │   └── cache-backup.ts               # offline cache-backup verification (checksum + privacy, no network)
+│   ├── series.ts / scoring.ts / etc.     # read-index-derived product logic (pure where possible)
 │   ├── db.ts                             # Neon read-index
 │   ├── llm.ts                            # model-routed LLM call
 │   ├── wallet.tsx                        # frontend wallet context (Stellar Wallets Kit)
 │   ├── wallet-connectors.ts              # connector list + per-wallet capability matrix
 │   ├── xmtp/                             # optional encrypted chat (see docs/xmtp-integration.md)
-│   └── server/                           # server-only modules (DB writers, etc.)
+│   └── server/                           # server-only modules (DB writers, read-index backup/restore, etc.)
 ├── schemas/
-│   └── agent-api-v1.schema.json          # BYOA request schema
+│   ├── agent-api-v1.schema.json          # BYOA request schema
+│   └── db-schema.snapshot.json           # pinned Postgres schema + migration snapshot
 ├── scripts/
 │   ├── stellar-keys.ts                   # keypairs + Friendbot + USDC trustline
 │   ├── stellar-usdc-faucet.ts            # testnet USDC helper
@@ -801,13 +788,26 @@ mimir-markets/
 │   ├── create-agent-wallets.ts           # generate 12 keypairs (oracle + creator + council)
 │   ├── fund-agents.ts                    # fund agents from a master seed
 │   ├── verify-deployment.ts              # assert the deployed contracts match this repo
+│   ├── verify-artifact-provenance.ts     # fail-closed Wasm digest / manifest checks
+│   ├── check-schema-snapshot.ts          # verify / write the Postgres schema snapshot (no DATABASE_URL)
+│   ├── verify-cache-backup.ts            # offline cache-backup verification (no DATABASE_URL)
+│   ├── check-npm-audit.ts                # triage npm audit JSON (no production secrets)
+│   ├── backup-read-index.ts              # dump the Neon read-index to a verified archive
+│   ├── restore-read-index.ts             # restore a verified archive (dry-run capable)
 │   ├── onchain-smoke.ts                  # end-to-end on-chain smoke
 │   ├── x402-stellar-smoke.ts             # payment-scheme smoke against live Testnet
 │   ├── demo-full-cycle.ts                # full create -> challenge -> settle in 90s
 │   ├── seed-claims.ts                    # bulk-seed demo markets
+│   ├── run-browser-smoke.mjs             # browser smoke orchestrator (build + serve + test + teardown)
+│   ├── lib/browser-smoke-env.mjs         # secret-free env allowlist for the smoke build
 │   └── warm-vs-index.ts                  # rebuild Neon cache from on-chain
-└── tests/node/                           # node:test unit + integration suites
+├── playwright.config.ts                  # browser-smoke config (system Chrome, no browser download)
+└── tests/
+    ├── node/                             # node:test unit + integration suites
+    └── browser/                          # Playwright browser smoke suite (npm run smoke:browser)
 ```
+
+See [`docs/CONTRACT_STORAGE.md`](docs/CONTRACT_STORAGE.md) for the module-level guide to `mimir-market` storage keys: every `DataKey` variant, its storage class (instance vs persistent), value type, TTL policy (`BUMP_THRESHOLD`/`BUMP_EXTEND`), which entry points touch it, and which reads extend TTL.
 
 ---
 
@@ -817,25 +817,20 @@ mimir-markets/
 
 - Node.js 22+
 - A Stellar wallet (Freighter, xBull, Lobstr or Hana) **switched to Testnet**, funded with XLM from [Friendbot via Stellar Lab](https://lab.stellar.org/account/fund) and test USDC from [Circle's faucet](https://faucet.circle.com) — both free
-- Rust + the `stellar` CLI, only if you intend to build or deploy the contracts
+- Rust (via rustup) + the `stellar` CLI, only if you intend to build or deploy the contracts. rustup installs the pinned toolchain from `rust-toolchain.toml` on first use; see [`docs/CONTRACT_TOOLCHAINS.md`](docs/CONTRACT_TOOLCHAINS.md)
 - At least one LLM API key configured in `.env.local`
 - Optional: a Neon account at [console.neon.tech](https://console.neon.tech) for the read-index
 
-### One-time bootstrap
-
-```bash
 git clone https://github.com/enliven17/mimir
 cd mimir
 npm install
 cp .env.example .env.local
 # Open .env.local and paste one LLM key (GEMINI_API_KEY is the default)
-```
+Provision the agent keypairs
+Small, idempotent scripts. Each one updates .env.local in-place when it succeeds, so re-running is safe.
 
-### Provision the agent keypairs
+Bash
 
-Small, idempotent scripts. Each one updates `.env.local` in-place when it succeeds, so re-running is safe.
-
-```bash
 # 1. Deployer + oracle keypairs, Friendbot-funded, with a USDC trustline.
 npm run stellar:keys
 
@@ -851,50 +846,86 @@ npm run agents:fund
 
 # 4. Verify balances.
 npm run agents:balances
-```
+Deploy the contracts
+Bash
 
-### Deploy the contracts
-
-```bash
 npm run deploy:contract        # build, deploy and initialize
+npm run verify:artifacts       # fail-closed Wasm digest check (no secrets)
 npm run verify:deployment      # assert the deployment matches this repo's config
 npm run smoke:onchain          # end-to-end: create -> challenge -> read back
-```
+deploy/deploy.ts builds the Soroban WASM, uploads and deploys both contracts, calls initialize with the owner, oracle, USDC Stellar Asset Contract id and the initial fee policy (STELLAR_PLATFORM_FEE_BPS, STELLAR_AGENT_OWNER_FEE_BPS), prints the explorer links, and writes NEXT_PUBLIC_STELLAR_MARKET_CONTRACT_ID and NEXT_PUBLIC_STELLAR_SQUAD_CONTRACT_ID into .env.local. initialize is one-shot and the fee cap is checked there, so a policy over 1000 bps total is refused at deploy time rather than discovered later.
 
-`deploy/deploy.ts` builds the Soroban WASM, uploads and deploys both contracts, calls `initialize` with the owner, oracle, USDC Stellar Asset Contract id and the initial fee policy (`STELLAR_PLATFORM_FEE_BPS`, `STELLAR_AGENT_OWNER_FEE_BPS`), prints the explorer links, and writes `NEXT_PUBLIC_STELLAR_MARKET_CONTRACT_ID` and `NEXT_PUBLIC_STELLAR_SQUAD_CONTRACT_ID` into `.env.local`. `initialize` is one-shot and the fee cap is checked there, so a policy over 1000 bps total is refused at deploy time rather than discovered later.
+The USDC SAC id is derived, not chosen — stellar contract id asset --asset USDC:<issuer> --network testnet. Do not hardcode one.
 
-The USDC SAC id is **derived**, not chosen — `stellar contract id asset --asset USDC:<issuer> --network testnet`. Do not hardcode one.
+Run the app
+Bash
 
-### Run the app
-
-```bash
 npm run dev                    # http://localhost:3000
-```
-
 In a separate terminal, run the agents:
 
-```bash
+Bash
+
 npm run workers                # oracle + market-creator + council + sync, color-prefixed logs
 # or individually:
 npm run oracle                 # poll + settle
 AUTO_CHALLENGE=1 npm run oracle  # also Kelly-stake on mispriced claims
 npm run market-creator         # opens new markets every 6h
 npm run council                # the ten-persona jury
+Browser smoke flow
+npm run smoke:browser builds the app, serves it on http://127.0.0.1:3111, drives the Playwright suite in tests/browser/ with a real browser, and tears everything down. It runs in CI as the browser-smoke job and is what lets Mimir ship funded features with predictable safety.
+
+What it runs: boot + locale routing + security headers (boot.spec.ts), every public page rendering (pages.spec.ts), the fail-closed health/feed/analytics endpoints (health.spec.ts), wallet-gated money paths (wallet-mock.spec.ts), and the ?demo=1 mock create-to-success flow (demo-create.spec.ts).
+
+Environment contract. The smoke flow is deterministic and secret-free. scripts/run-browser-smoke.mjs moves every .env* file Next.js reads (.env, .env.local, .env.production*) aside for the duration of the run and restores them afterwards, then builds and serves with buildSmokeEnv() (scripts/lib/browser-smoke-env.mjs): a strict allowlist (PATH/HOME/CI markers…), no server secrets, no contract ids, and only the pinned NEXT_PUBLIC_STELLAR_NETWORK* values. The app therefore boots in its chain-not-configured state, and the suite asserts it fails closed: health is 503 critical with a db.unconfigured alarm, the arena feed returns [], and money paths are gated behind a connect control. A served page matching a secret pattern fails the run.
+
+Browser. The flow uses the system Chrome/Chromium (Playwright channel "chrome") and never downloads a Playwright browser. Point it at a specific binary with SMOKE_CHROME_PATH=/path/to/chrome.
+
+Bash
+
+npm run smoke:browser                        # full cycle build + serve + test + teardown
+npm run smoke:browser -- --skip-build        # reuse an existing .next build (fast iteration)
+npm run smoke:browser -- --filter boot       # run only the boot spec
 ```
+
+**Failure, rollback and artifacts.** On failure the run prints where to look, restores the moved `.env*` files and kills the server, and CI uploads `playwright-report/` + `test-results/` for 7 days. Every mode of the runner tears down cleanly, so a developer can always rerun exactly what CI ran with one command: `npm run smoke:browser`.
+
+### Public operational status surface
+
+Mimir exposes a public, unauthenticated, privacy-safe operational status endpoint at `/api/health/status` (and an operational status reference on `/api/health`). It provides unified telemetry on deployment state, artifact provenance, capability pause flags, and health alarms without requiring production secrets.
+
+**Core guarantees:**
+- **Chain-first accounting:** Soroban contracts and Stellar ledgers are authoritative for all funds and settlements. The Postgres database is an idempotent read-index projection.
+- **Fail-closed posture:** Missing database configuration, missing contract StrKeys in release mode, or unpinned/corrupted artifact digests elevate the status to `critical` and return HTTP 503, preventing silent bypass of money or deployment controls.
+- **Invariant protection:** In accordance with non-custodial principles, withdrawals (`withdraw`) and audit/read paths (`read_markets`, `read_reasoning`) are strictly non-pausable (`invariant_never_pausable`) under all conditions, even if `MIMIR_PAUSE_ALL=1` or `MIMIR_PAUSE_WITHDRAW=1` is set.
+- **Privacy safety:** Zero secrets (`S…` seeds, database passwords, API tokens, user PII) are ever returned.
+- **Clean checkout verification:** Verifiable offline or in CI from a fresh clone without environment secrets:
+
+```bash
+npm run verify:status                         # default develop mode verification
+npm run verify:status -- --mode=release       # release mode: enforces contracts & pinned artifacts
+npm run verify:status -- --strict             # warnings treated as failures
+npm run verify:status -- --json               # machine-readable JSON output
+```
+
+**Failure and rollback guidance:**
+- *Database unconfigured / alarms:* Inspect `report.health.alarms`. Database failure triggers HTTP 503 while preserving read-only static surfaces and on-chain Soroban withdrawal accessibility.
+- *Artifact digest mismatch:* If `verify:artifacts` or `verify:status` flags unpinned or mismatched Wasm digests, verify git tags and rebuild deterministic Wasm via `cargo build --target wasm32-unknown-unknown --release`.
+- *Capability mitigation:* During incidents, individual capabilities (e.g. `MIMIR_PAUSE_STAKE=1`, `MIMIR_PAUSE_COPY_EXECUTION=1`, `MIMIR_PAUSE_RESEARCH=1`) or global actions (`MIMIR_PAUSE_ALL=1`) can be toggled via environment variables without redeploying code. Withdrawals remain unaffected.
 
 ---
 
 ## End-to-end demo
 
+End-to-end demo
 There is a single script that exercises the full economic loop in ~90 seconds:
 
-```bash
-npx tsx --env-file=.env.local scripts/demo-full-cycle.ts
-```
+Bash
 
+npx tsx --env-file=.env.local scripts/demo-full-cycle.ts
 What it does:
 
-```mermaid
+mermaid
+
 flowchart TB
     A[market-creator account<br/>create_claim BTC > $100k<br/>2 USDC, 150s deadline] --> B[oracle account<br/>challenge_claim<br/>2 USDC counter-stake]
     B --> C{wait ~170s}
@@ -902,17 +933,13 @@ flowchart TB
     D --> E[LLM layer evaluates evidence<br/>CHALLENGERS_WIN or CREATOR_WINS]
     E --> F[oracle account<br/>resolve_claim]
     F --> G[creator paid on resolve, or the<br/>challenger pulls its share<br/>balances reconcile on-chain]
-```
-
 The script prints the explorer URL for every transaction so you can verify each step on chain.
 
----
-
-## Production deploy (Vercel + Railway)
-
+Production deploy (Vercel + Railway)
 Mimir splits cleanly between a serverless frontend and long-running agent workers. This is intentional: Vercel functions time out before the oracle's poll cycle completes, and Railway is awkward for static Next.js. The two-platform split lets each piece run where it fits.
 
-```mermaid
+mermaid
+
 flowchart LR
     subgraph github[GitHub]
         REPO[main branch]
@@ -996,7 +1023,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `MIMIR_FEATURE_COPY_TRADING`      | copy routes              | `1` enables copy-trading execution                                                  |
 | `MIMIR_FEATURE_AGENT_BASKETS`     | basket routes            | `1` enables basket composition and following                                        |
 | `MIMIR_FEATURE_FEE_POLICY`        | settlement               | `1` enforces the fee policy; needs the audited `mimir-market` escrow deployed first |
-| `MIMIR_PAUSE_<CAPABILITY>`        | ops                      | `1` pauses one capability (`stake`, `create_market`, `copy_execution`, `x402_selling`, ...); `MIMIR_PAUSE_ALL=1` for all. Withdrawals are never pausable |
+| `MIMIR_PAUSE_<CAPABILITY>`        | ops                      | `1` pauses one capability (`stake`, `create_market`, `copy_execution`, `x402_selling`, ...); `MIMIR_PAUSE_ALL=1` for all. Withdrawals are never pausable. Full list and behavior: [`docs/INCIDENT_KILL_SWITCHES.md`](docs/INCIDENT_KILL_SWITCHES.md) |
 | `MIMIR_DISABLE_CATEGORY_<ID>`     | ops                      | `1` stops new markets in one category without a deploy                              |
 | `SPEND_PERMISSION_SPENDER`        | agent API                | Mimir's spender (`G…` or `C…`) for BYOA spend permissions; unset means funded actions cannot be delegated |
 | `DATABASE_URL`                    | optional (Neon)          | Read-index cache. Pages that need it fail gracefully if absent                     |
@@ -1005,6 +1032,7 @@ Every env var lives in `.env.example`. Quick reference:
 
 | Variable                          | Required by              | Notes                                                                              |
 | --------------------------------- | ------------------------ | ---------------------------------------------------------------------------------- |
+| `MIMIR_REQUIRE_ARTIFACT_PROVENANCE` | deploy / CI            | `1` forces release-mode Wasm digest pins before deploy |
 | `STELLAR_DEPLOYER_SECRET`         | deploy                   | Deploys and initializes the contracts; becomes the `owner` role                     |
 | `STELLAR_ORACLE_SECRET`           | oracle (worker)          | The oracle's local `S…` seed; its `G…` address is the contract's `oracle` role      |
 | `CREATOR_SECRET`                  | market-creator (worker)  | The market-creator's local `S…` seed                                                |
@@ -1015,6 +1043,7 @@ Every env var lives in `.env.example`. Quick reference:
 | `ORACLE_LLM_MODEL`                | optional                 | Optional model name override                                                       |
 | `ORACLE_LLM_THROTTLE_MS`          | oracle                   | Min delay between oracle LLM calls; default `8000`                                 |
 | `ORACLE_SETTLEMENT_DELAY_MS`      | oracle                   | Delay between multiple expired settlements in one poll; default `900000` (15 min)  |
+| `ORACLE_SETTLEMENT_TX_MAX_ATTEMPTS` / `_RETRY_BASE_MS` / `_RETRY_MAX_MS` | oracle | Bounded retries for dependency failures only; defaults `3` / `1000` / `15000` ms. Every attempt re-reads Soroban state |
 | `AUTO_CHALLENGE`                  | oracle (worker)          | `1` to enable Kelly auto-stake                                                     |
 | `CHALLENGE_STAKE_USDC`            | oracle (worker)          | Min stake per auto-challenge, in USDC (default 2)                                   |
 | `CHALLENGE_CONFIDENCE`            | oracle (worker)          | Min LLM confidence % to auto-stake (default 80)                                    |
@@ -1051,7 +1080,11 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run build` / `npm start`                | Production build / serve                                                           |
 | `npm run typecheck`                          | `tsc --noEmit` across app, workers and scripts                                     |
 | `npm run check:terms`                        | Forbidden-terms lint (keeps pre-Stellar chain names and bespoke-402 residue out)   |
+| `npm run check:locales`                      | Locale completeness check — diffs every registered locale against `messages/en.json`; exits 1 on missing or funded-feature violations |
+| `npm run check:locales:strict`               | Same as above but also fails on extra (stale) keys not present in the English baseline |
 | `npm run test:contracts`                     | `cargo test --release` over `contracts-soroban`                                     |
+| `npm run check:toolchains`                   | Pinned release toolchain, contract MSRV and CI toolchain matrix agree (no Rust needed) |
+| `npm run check:schema-snapshot`              | Fail-closed Postgres schema / migration drift check; `-- --write` regenerates the snapshot (no secrets) |
 | `npm run workers`                            | Run all agent workers in parallel (Railway entry point: oracle + market-creator + council + sync + traders) |
 | `npm run oracle`                             | Run only the oracle (settler; optionally `AUTO_CHALLENGE=1`)                       |
 | `npm run market-creator`                     | Run only the market-creator                                                        |
@@ -1066,18 +1099,80 @@ Every env var lives in `.env.example`. Quick reference:
 | `npm run agents:balances`                    | Print oracle + creator + council USDC and XLM balances                             |
 | `npm run deploy:contract`                    | Build, deploy and initialize the Soroban contracts on Stellar Testnet              |
 | `npm run verify:deployment`                  | Check the deployed contract ids, WASM hash and initialized config                  |
-| `npm run verify:analytics`                   | Check the analytics gates the launch gate requires                                 |
+| `npm run verify:artifacts`                   | Verify / pin Soroban Wasm digests against `deploy/contract-artifacts.manifest.json` (no secrets) |
+| `npm run verify:analytics`                   | Check exported analytics quality; privacy/release runbook: [`docs/ANALYTICS_PRIVACY.md`](./docs/ANALYTICS_PRIVACY.md) |
+| `npm run backup:read-index`                  | Dump the Neon read-index cache to a self-verified checksummed archive (`--out <path>` or stdout; needs `DATABASE_URL`, no seeds) |
+| `npm run verify:cache-backup`                | Verify a cache-backup archive offline — no `DATABASE_URL`, no network, byte-reproducible |
+| `npm run restore:read-index`                 | Restore a *verified* archive into the Neon read-index and fingerprint-check the result (`--dry-run` to preview) |
 | `npm run smoke:onchain`                      | On-chain smoke test against the live deployment (`:full` adds resolve + squad)     |
 | `npm run smoke:x402` / `:http`               | Payment-scheme smoke against live Testnet / a full HTTP round trip                 |
-| `npm run test:smoke`                         | Node-native smoke tests (API validation, XMTP, db-index, etc.)                     |
+| `npm run load:x402`                          | Offline load test: fixture verification + settle/replay limits                      |
+| `npm run load:rate-limit`                    | Offline load test: the API rate limiter under mixed traffic                         |
+| `npm run test:node`                          | Full Node test suite with a versioned compile cache and process isolation           |
+| `npm run test:node:coverage`                 | Full Node suite plus a fresh LCOV report at `coverage/node/node-tests.lcov`         |
+| `npm run test:smoke`                         | Backwards-compatible alias for the Node test runner                                |
 | `npm run test:research`                      | Research adapters, categories, SSRF guard, x402 discovery suites                   |
 | `npm run test:baskets`                       | Basket validation, virtual NAV and high-water fee suites                           |
 | `npm run test:squad`                         | Squad view and pool suites                                                         |
-| `npm run test:schema`                        | Schema backlog suites                                                              |
+| `npm run test:schema`                        | Schema backlog + schema snapshot gate suites                                       |
+| `npm run test:kill-switches`                 | Every incident kill switch at its enforcement point, offline                       |
 | `npm run warm:vs-index`                      | Rebuild the Neon read-index from current on-chain state                            |
 | `npm run seed` / `npm run seed:dry`          | Seed demo claims (live / dry-run)                                                  |
 | `npx tsx scripts/demo-full-cycle.ts`         | Full create -> challenge -> settle demo in ~90s                                    |
 | `npx tsx scripts/check-claim.ts <id>`        | Print a claim's state and deadline                                                 |
+| `npm run rollback:rehearsal`                 | Dry-run the full deployment rollback against a deterministic fixture (no secrets needed, runs in CI) |
+| `npm run rollback:rehearsal:live`            | Same rehearsal against your local `.env.local` (does not touch the chain)          |
+
+### Node test workflow
+
+`npm run test:node` is the release-safe full Node suite. It discovers every
+`tests/node/*.test.ts` file, keeps Node's process-per-file isolation, and uses a
+compile-only cache under `.cache/node-tests`. The cache is keyed by Node,
+`package-lock.json`, `tsx`, and the runner; test outcomes are never cached. Use
+`npm run test:node -- --no-cache` to force a clean compilation or
+`-- --clear-cache` to remove the selected cache before a run.
+
+The child test environment is an explicit allowlist. It does not load
+`.env.local` or pass production seeds, RPC credentials, LLM keys, or other
+secrets. Database-backed tests remain skipped by default; use
+`npm run test:node -- --with-db` only with an isolated test database and local
+credentials. This workflow does not write to Stellar, Neon, or any deployment.
+
+`npm run test:node:coverage` runs the same complete suite with fresh spec and
+LCOV reporters. A passing run publishes `coverage/node/node-tests.lcov`; a
+failing run publishes `coverage/node/node-tests.failed.lcov` and exits nonzero.
+CI uploads the report on success or failure, including on a cache miss. The
+report contains source paths and coverage data, not environment values or test
+secrets. Neither `--test-isolation=none` nor result reruns are part of the
+release command.
+
+For a local cache reset, remove `.cache/node-tests`. A rollback is limited to
+reverting the runner, package scripts, and CI cache/artifact steps; it does not
+require a contract migration, chain action, or deployment rollback.
+
+### CI: fail-closed path filters
+
+CI decides what to run from an allowlist (`.github/workflows/ci.yml`). The
+`paths` job classifies every changed path via `scripts/ci/changed-paths.mjs`
+(mirrored and under test in `lib/ci/path-scope.ts`), then the `suites` matrix
+runs only the tiers (`app`, `agents`, `contracts`, `tests`) the change touches.
+The rules that keep it honest:
+
+- **Fail closed.** A path matching no scope is UNKNOWN and fails the job. When
+  the change set cannot be determined at all (missing event payload, failed
+  fetch, no merge-base), every tier runs. A green check never hides suites.
+- **Adding a scope is a reviewed decision.** New top-level directories, root
+  files and docs exemptions must be added to both `lib/ci/path-scope.ts` and
+  `scripts/ci/changed-paths.mjs`; `npm run check:driver-parity` fails when the
+  two drift, and `tests/node/ci-path-scope.test.ts` pins the behaviour.
+- **Doc-only changes** (README, CHANGELOG, LICENSE, `docs/`) are the only changes that
+  enable nothing.
+
+To preview what CI would run for your branch:
+
+```bash
+npm run ci:changed-paths -- --base origin/main
+```
 
 ---
 
@@ -1115,11 +1210,69 @@ These show up in PR review and shape what we accept:
 
 ---
 
+## Running tests & coverage
+
+Mimir's money-moving paths are gated by a coverage step that runs in CI and locally without any production secrets.
+
+### Quick start
+
+```sh
+# Run all node tests (same as CI test:smoke)
+npm run test:smoke
+
+# Run the coverage-gated subset and print a summary
+npm run test:coverage
+
+# If PASS_SECRET is not set in your environment, set any non-empty value:
+PASS_SECRET=test npm run test:coverage
+```
+
+`DATABASE_URL` is **not required** — `lib/paid-revenue.ts` falls back to an in-memory ring buffer when the variable is unset, which is the default test path.
+
+### Covered modules and thresholds
+
+`npm run test:coverage` enforces the following minimums via [c8](https://github.com/bcoe/c8) on each of the 8 money-moving modules:
+
+| Module | Lines | Branches |
+|---|---|---|
+| `lib/fees.ts` | 80% | 70% |
+| `lib/payout.ts` | 80% | 70% |
+| `lib/money.ts` | 80% | 70% |
+| `lib/paid-pass.ts` | 80% | 70% |
+| `lib/paid-revenue.ts` | 80% | 70% |
+| `lib/x402/buyer.ts` | 80% | 70% |
+| `lib/agents/registry.ts` | 80% | 70% |
+| `lib/agents/spend-permissions.ts` | 80% | 70% |
+
+Thresholds are declared in `.c8rc` at the workspace root. The step fails the build when any threshold is breached.
+
+### Test suites
+
+New test files covering the previously-untested modules live in `tests/node/`:
+
+- `money.test.ts` — `formatUsdc` / `formatUsdcBare` edge cases
+- `paid-pass.test.ts` — HMAC round-trip, expiry, tamper detection
+- `paid-revenue.test.ts` — in-memory ledger idempotency, ring-buffer eviction, aggregation
+- `x402-buyer.test.ts` — kill-switch fail-closed, `PaymentBudgetExceeded` properties
+
+All tests use the Node built-in test runner (`node --test`). No additional test framework is required.
+
+### When to update this section
+
+Update this section in the same PR if you:
+- add a new environment variable that the `test:coverage` step requires
+- rename or remove the `npm run test:coverage` command
+- add, remove, or reorder steps in `.github/workflows/ci.yml`
+
+---
+
 ## License
 
 AGPL-3.0: see [`LICENSE`](./LICENSE).
 
 Mimir is source-available. You can use, study, modify, and share it freely.
-The catch (the *A* in AGPL): if you run a modified version as a hosted
+The catch (the A in AGPL): if you run a modified version as a hosted
 service, you must publish your changes under the same license. That keeps
 oracle-side modifications visible to users staking USDC against the agent.
+
+Malformed evidence fails closed. A supplied evidence_hash must be exactly 32 bytes (64 hexadecimal characters, with an optional 0x prefix) or the client rejects it before signing and submission. Omission keeps the existing zero-hash sentinel for compatible callers, while the Soroban ABI independently enforces BytesN<32>. This is a client validation-only rollout: it changes no storage, fees, escrow, payouts, permissions, or secrets; requires no migration or redeployment; and can be rolled back with the client change alone.

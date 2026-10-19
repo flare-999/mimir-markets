@@ -26,6 +26,7 @@ import {
   MIN_STAKE_OPTIONS,
   normalizeExploreMinStake,
   type ExploreSort,
+  type ExplorerView,
 } from "@/lib/exploreFilters";
 import type {
   ChallengeOpportunitiesResponse,
@@ -36,12 +37,15 @@ import { useExploreFilterState } from "@/hooks/useExploreFilterState";
 import PageTransition, { AnimatedItem } from "@/components/PageTransition";
 import { ArenaCardSkeleton } from "@/components/ui";
 import ArenaCard from "@/components/ArenaCard";
+import MarketCardGrid from "@/components/MarketCardGrid";
 import EmptyState from "@/components/EmptyState";
 import ExploreArenaEmptyState from "@/components/explorer/ExploreArenaEmptyState";
 import ExploreFilteredEmptyState from "@/components/explorer/ExploreFilteredEmptyState";
 import { ChevronDown, ListFilter, RefreshCw, Search, X } from "lucide-react";
 import ChallengeOpportunityCard from "@/components/explorer/ChallengeOpportunityCard";
 import { BlueprintHeading } from "@/components/BlueprintGrid";
+import CacheFreshnessPill from "@/components/CacheFreshnessPill";
+import StaleIndexWarning from "@/components/StaleIndexWarning";
 import type { VSCacheFreshness } from "@/lib/vs-freshness";
 
 const SECONDS_PER_DAY = 86_400;
@@ -51,8 +55,6 @@ const filterPillBase =
 const filterPillActive = "border-pv-emerald/50 bg-pv-emerald text-pv-bg";
 const filterPillInactive =
   "border-pv-ink/[0.15] bg-transparent text-pv-muted hover:border-pv-ink/[0.28] hover:text-pv-text";
-
-type ArenaViewMode = "open" | "ai" | "closed";
 
 function getOpportunitySearchBlob(opportunity: ChallengeOpportunity) {
   return [
@@ -78,9 +80,10 @@ function sortOpportunities(
   const next = [...opportunities];
 
   if (sort === "expiring") {
-    return next.sort(
-      (a, b) => getOpportunityDeadlineValue(a) - getOpportunityDeadlineValue(b)
-    );
+    return next.sort((a, b) => {
+      const diff = getOpportunityDeadlineValue(a) - getOpportunityDeadlineValue(b);
+      return diff !== 0 ? diff : String(b.id).localeCompare(String(a.id));
+    });
   }
 
   if (sort === "strength" || sort === "highest") {
@@ -88,11 +91,12 @@ function sortOpportunities(
       if (b.candidate.confidenceScore !== a.candidate.confidenceScore) {
         return b.candidate.confidenceScore - a.candidate.confidenceScore;
       }
-      return b.claimStrengthScore - a.claimStrengthScore;
+      const diff = b.claimStrengthScore - a.claimStrengthScore;
+      return diff !== 0 ? diff : String(b.id).localeCompare(String(a.id));
     });
   }
 
-  return next;
+  return next.sort((a, b) => String(b.id).localeCompare(String(a.id)));
 }
 
 function IntelligenceDossierSkeleton() {
@@ -140,14 +144,15 @@ export default function ExploreClient() {
   const [allVS, setAllVS] = useState<VSData[]>([]);
   const [opportunities, setOpportunities] = useState<ChallengeOpportunity[]>([]);
   const [vsFreshness, setVsFreshness] = useState<VSCacheFreshness | null>(null);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [opportunitiesLoading, setOpportunitiesLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [sortMenuOpen, setSortMenuOpen] = useState(false);
   const [quickFilterMenuOpen, setQuickFilterMenuOpen] = useState(false);
   const [minDraft, setMinDraft] = useState("");
-  const [activeView, setActiveView] = useState<ArenaViewMode>("open");
   const [, startViewTransition] = useTransition();
   const sortMenuRef = useRef<HTMLDivElement>(null);
   const quickFilterMenuRef = useRef<HTMLDivElement>(null);
@@ -180,6 +185,7 @@ export default function ExploreClient() {
           if (requestId === requestIdRef.current) {
             setAllVS(mergePendingVS(results.items));
             setVsFreshness(results.cache);
+            setNextCursor(results.nextCursor ?? null);
           }
         })
         .catch((error) => {
@@ -250,6 +256,25 @@ export default function ExploreClient() {
     },
     [locale, opportunitiesEnabled]
   );
+
+  const loadMoreVS = useCallback(async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const results = await getAllVSSnapshot({ cursor: nextCursor });
+      setAllVS((prev) => {
+        // Simple deduplication by id in case of overlap
+        const existingIds = new Set(prev.map((vs) => vs.id));
+        const newItems = results.items.filter((vs) => !existingIds.has(vs.id));
+        return mergePendingVS([...prev, ...newItems]);
+      });
+      setNextCursor(results.nextCursor ?? null);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [nextCursor, loadingMore]);
 
   useEffect(() => {
     void loadExploreData({ showPageLoading: true });
@@ -362,7 +387,7 @@ export default function ExploreClient() {
     opportunities,
   ]);
 
-  const { cat, sort, search, minStake, needsChallengers, expiringSoon, underdogOnly } =
+  const { cat, sort, search, minStake, needsChallengers, expiringSoon, underdogOnly, view: activeView } =
     filters;
 
   useEffect(() => {
@@ -477,12 +502,13 @@ export default function ExploreClient() {
   }, [quickFilterMenuOpen, sortMenuOpen]);
 
   const switchView = useCallback(
-    (nextView: ArenaViewMode) => {
+    (nextView: ExplorerView) => {
       startViewTransition(() => {
         if (nextView === "ai") {
-          updateFilters({ needsChallengers: false });
+          updateFilters({ needsChallengers: false, view: nextView });
+        } else {
+          updateFilters({ view: nextView });
         }
-        setActiveView(nextView);
       });
     },
     [startViewTransition, updateFilters]
@@ -541,7 +567,10 @@ export default function ExploreClient() {
     }
 
     return (
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <MarketCardGrid
+        aria-label="Settled market cards"
+        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
+      >
         {filteredClosedChallenges.map((vs) => (
           <motion.div
             key={vs.id}
@@ -559,7 +588,7 @@ export default function ExploreClient() {
             />
           </motion.div>
         ))}
-      </div>
+      </MarketCardGrid>
     );
   };
 
@@ -599,7 +628,10 @@ export default function ExploreClient() {
     }
 
     return (
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <MarketCardGrid
+        aria-label="Open market cards"
+        className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
+      >
         {filteredOpenChallenges.map((vs) => (
           <motion.div
             key={vs.id}
@@ -617,7 +649,7 @@ export default function ExploreClient() {
             />
           </motion.div>
         ))}
-      </div>
+      </MarketCardGrid>
     );
   };
 
@@ -684,7 +716,20 @@ export default function ExploreClient() {
     <PageTransition>
       <div className="mb-8">
         <BlueprintHeading>{t("title")}</BlueprintHeading>
+        {activeView !== "ai" ? (
+          <div className="mt-3">
+            <CacheFreshnessPill freshness={vsFreshness} />
+          </div>
+        ) : null}
       </div>
+
+      {activeView !== "ai" ? (
+        <StaleIndexWarning
+          freshness={vsFreshness}
+          refreshing={refreshing}
+          onRefresh={() => void loadExploreData({ forceRefresh: true })}
+        />
+      ) : null}
 
       {/* z-20: filter dropdowns (absolute z-40) must stack above #arena-content — Framer
           motion siblings create stacking contexts; later DOM order was painting cards on top. */}
@@ -1292,6 +1337,18 @@ export default function ExploreClient() {
               </motion.div>
             )}
           </AnimatePresence>
+          {nextCursor && activeView !== "ai" && (
+            <div className="mt-8 flex justify-center">
+              <button
+                type="button"
+                onClick={loadMoreVS}
+                disabled={loadingMore}
+                className="rounded border border-pv-border/25 bg-pv-surface px-6 py-3 font-display text-sm font-bold uppercase tracking-tight text-pv-text transition-colors hover:border-pv-ink/[0.15] disabled:opacity-50"
+              >
+                {loadingMore ? "Loading..." : "Load more"}
+              </button>
+            </div>
+          )}
         </section>
       </AnimatedItem>
     </PageTransition>

@@ -8,7 +8,7 @@ use soroban_sdk::testutils::Address as _;
 use soroban_sdk::Address;
 
 use crate::test_common::{Fixture, USDC};
-use crate::types::{Error, WinnerSide, FEE_TIMELOCK_SECONDS, MAX_TOTAL_FEE_BPS};
+use crate::types::{Error, WinnerSide, FEE_TIMELOCK_SECONDS, MAX_TOTAL_FEE_BPS, ORACLE_TIMELOCK_SECONDS};
 
 // ── The cap ──────────────────────────────────────────────────────────────────
 
@@ -223,6 +223,70 @@ fn a_new_claim_picks_up_the_new_policy() {
     assert_eq!(snapshot.agent_owner_recipient, None);
 }
 
+#[test]
+fn a_queued_but_unexecuted_policy_is_not_snapshotted() {
+    let f = Fixture::new(100, 0);
+    // Queue a higher policy; do not execute. Creation must freeze the LIVE policy.
+    f.client()
+        .queue_fee_policy(&900, &100, &Some(f.platform.clone()));
+    assert!(f.client().get_pending_fee_policy().is_some());
+
+    let creator = f.user(100 * USDC);
+    let id = f.client().create_claim(&creator, &f.params(10 * USDC));
+    let snapshot = f.client().get_claim_fees(&id);
+    assert_eq!(snapshot.platform_fee_bps, 100);
+    assert_eq!(snapshot.agent_owner_fee_bps, 0);
+    assert_eq!(snapshot.platform_recipient, Some(f.platform.clone()));
+}
+
+#[test]
+fn changing_the_platform_recipient_cannot_redirect_an_existing_claim() {
+    let f = Fixture::new(1_000, 0);
+    let creator = f.user(100 * USDC);
+    let c1 = f.user(100 * USDC);
+    // The fee timelock is two days, so the claim's deadline has to outlive the
+    // queue/execute cycle below: the challenge afterwards must still land
+    // inside the claim's challenge window.
+    let mut params = f.params(10 * USDC);
+    params.deadline = f.env.ledger().timestamp() + FEE_TIMELOCK_SECONDS + 3_600;
+    let id = f.client().create_claim(&creator, &params);
+    assert_eq!(
+        f.client().get_claim_fees(&id).platform_recipient,
+        Some(f.platform.clone())
+    );
+
+    // Challenge BEFORE the timelock advance so the claim deadline is not reached.
+    f.client().challenge_claim(&c1, &id, &(10 * USDC), &None);
+
+    let new_platform = Address::generate(&f.env);
+    f.client()
+        .queue_fee_policy(&1_000, &0, &Some(new_platform.clone()));
+    f.advance_by(FEE_TIMELOCK_SECONDS);
+    f.client().execute_fee_policy();
+    assert_eq!(
+        f.client().get_fee_policy().platform_recipient,
+        Some(new_platform.clone())
+    );
+    // Frozen recipient on the claim is unchanged.
+    assert_eq!(
+        f.client().get_claim_fees(&id).platform_recipient,
+        Some(f.platform.clone())
+    );
+
+    f.advance_by(3_600);
+    f.client().resolve_claim(
+        &id,
+        &WinnerSide::Creator,
+        &f.str("creator"),
+        &90,
+        &f.zero_hash(),
+    );
+
+    // Fees accrued to the snapshotted recipient, not the new live one.
+    assert_eq!(f.client().get_accrued_fees(&f.platform), USDC);
+    assert_eq!(f.client().get_accrued_fees(&new_platform), 0);
+}
+
 // ── Agent attribution ────────────────────────────────────────────────────────
 
 #[test]
@@ -317,34 +381,99 @@ fn fees_are_pulled_not_pushed_and_only_once() {
     assert_eq!(stats.fees_accrued, expected);
     assert_eq!(stats.fees_claimed, expected);
 
-    let err = f.client().try_claim_fees(&f.platform).unwrap_err().unwrap();
-    assert_eq!(err, Error::NoFees);
+    assert_eq!(f.client().claim_fees(&f.platform), 0);
 }
 
 #[test]
 fn an_unrelated_address_has_no_fees_to_claim() {
     let f = Fixture::new(1_000, 0);
     let stranger = Address::generate(&f.env);
-    let err = f.client().try_claim_fees(&stranger).unwrap_err().unwrap();
-    assert_eq!(err, Error::NoFees);
+    assert_eq!(f.client().claim_fees(&stranger), 0);
 }
 
 // ── Ownership / oracle ───────────────────────────────────────────────────────
 
 #[test]
-fn ownership_and_oracle_transfer_are_owner_gated() {
+fn ownership_transfer_is_owner_gated() {
     let f = Fixture::new(0, 0);
     let new_owner = Address::generate(&f.env);
-    let new_oracle = Address::generate(&f.env);
 
     f.env.set_auths(&[]);
-    assert!(f.client().try_set_oracle(&new_oracle).is_err());
     assert!(f.client().try_transfer_ownership(&new_owner).is_err());
 
     f.env.mock_all_auths();
-    f.client().set_oracle(&new_oracle);
-    assert_eq!(f.client().get_oracle(), new_oracle);
-
     f.client().transfer_ownership(&new_owner);
     assert_eq!(f.client().get_owner(), new_owner);
+}
+
+#[test]
+fn oracle_rotation_is_owner_gated_and_timelocked() {
+    let f = Fixture::new(0, 0);
+    let new_oracle = Address::generate(&f.env);
+    let previous = f.client().get_oracle();
+
+    f.env.set_auths(&[]);
+    assert!(f.client().try_queue_oracle(&new_oracle).is_err());
+
+    f.env.mock_all_auths();
+    f.client().queue_oracle(&new_oracle);
+    let queued = f.client().get_pending_oracle().unwrap();
+    assert_eq!(queued.next, new_oracle);
+    assert_eq!(
+        queued.executable_at,
+        f.env.ledger().timestamp() + ORACLE_TIMELOCK_SECONDS
+    );
+    // Active oracle unchanged until execute.
+    assert_eq!(f.client().get_oracle(), previous);
+
+    let err = f.client().try_execute_oracle().unwrap_err().unwrap();
+    assert_eq!(err, Error::Timelocked);
+
+    f.advance_by(ORACLE_TIMELOCK_SECONDS - 1);
+    let err = f.client().try_execute_oracle().unwrap_err().unwrap();
+    assert_eq!(err, Error::Timelocked);
+
+    f.advance_by(1);
+    f.client().execute_oracle();
+    assert_eq!(f.client().get_oracle(), new_oracle);
+    assert!(f.client().get_pending_oracle().is_none());
+}
+
+#[test]
+fn oracle_rotation_execution_is_permissionless_after_timelock() {
+    let f = Fixture::new(0, 0);
+    let new_oracle = Address::generate(&f.env);
+
+    f.client().queue_oracle(&new_oracle);
+    f.advance_by(ORACLE_TIMELOCK_SECONDS);
+
+    f.env.set_auths(&[]);
+    f.client().execute_oracle();
+    assert_eq!(f.client().get_oracle(), new_oracle);
+}
+
+#[test]
+fn cancelling_oracle_rotation_requires_owner_and_a_queue() {
+    let f = Fixture::new(0, 0);
+    let new_oracle = Address::generate(&f.env);
+
+    let err = f
+        .client()
+        .try_cancel_oracle()
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, Error::NothingQueued);
+
+    f.client().queue_oracle(&new_oracle);
+    f.env.set_auths(&[]);
+    assert!(f.client().try_cancel_oracle().is_err());
+
+    f.env.mock_all_auths();
+    f.client().cancel_oracle();
+    assert!(f.client().get_pending_oracle().is_none());
+    assert_eq!(f.client().get_oracle(), f.oracle);
+
+    f.advance_by(ORACLE_TIMELOCK_SECONDS * 2);
+    let err = f.client().try_execute_oracle().unwrap_err().unwrap();
+    assert_eq!(err, Error::NothingQueued);
 }

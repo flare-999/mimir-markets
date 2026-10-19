@@ -42,7 +42,7 @@ test("every contents entry has a section to link to", () => {
   }
 });
 
-test("the contents run in the same order as the page", () => {
+test("contents run in the same order as the page", () => {
   // Numbering comes from the TOC index, so a mismatched order shows up as a
   // sidebar that counts 01, 02, 04 while the reader scrolls past 03.
   assert.deepEqual(renderedIds(), tocIds());
@@ -51,4 +51,30 @@ test("the contents run in the same order as the page", () => {
 test("ids are unique", () => {
   const ids = tocIds();
   assert.equal(new Set(ids).size, ids.length, "duplicate id in TOC_SECTIONS");
+});
+
+/**
+ * The VS XMTP panel is client-side and rendered on the VS detail page. Internal
+ * links must go through the locale-aware Link from @/i18n/navigation so they
+ * keep the locale prefix (routing uses localePrefix: "always"). Importing the
+ * plain `next/link` Link sends every click through an extra redirect and drops
+ * the user's locale once a second locale ships.
+ */
+const LOCALE_AWARE_LINK_FILES = [
+  join(process.cwd(), "components", "xmtp", "VsXmtpPanel.tsx"),
+];
+
+test("VS XMTP panel uses the locale-aware Link", () => {
+  for (const file of LOCALE_AWARE_LINK_FILES) {
+    const source = readFileSync(file, "utf8");
+    assert.ok(
+      !/from\s+(["'])next\/link\1/.test(source),
+      `${file} imports Link from "next/link"; use "@/i18n/navigation" instead to keep the locale prefix`,
+    );
+    assert.match(
+      source,
+      /import\s*\{\s*Link\s*\}\s*from\s+(")(?:\.\/i18n\/navigation|@\/i18n\/navigation)\1/,
+      `${file} should import { Link } from "@/i18n/navigation"`,
+    );
+  }
 });

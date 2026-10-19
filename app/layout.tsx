@@ -31,17 +31,14 @@ export default function RootLayout({
         />
       </head>
       <body className="overflow-x-hidden">
-        <NextTopLoader
-          color="#22D3EE"
-          height={2}
-          showSpinner={false}
-          shadow={false}
-        />
+        <NextTopLoader color="#22D3EE" />
         {/*
           One provider, not a stack of them. The EVM-era tree needed a connector
           config provider and a query client under the wallet context; Stellar
           Wallet Kit keeps its state in module-level signals and needs no provider
           of its own, so WalletProvider is the whole wallet tree.
+          The XMTP SDK is dynamically imported inside XmtpProvider, so this layout
+          stays free of the SDK and its WASM for pages that never open a chat.
         */}
         <WalletProvider>
           <XmtpProvider>{children}</XmtpProvider>

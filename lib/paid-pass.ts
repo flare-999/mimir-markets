@@ -7,7 +7,9 @@
  * expiry); bind to caller identity + a nonce store if abuse becomes a concern.
  */
 
-import "server-only";
+// Pure pass logic, importable by tests. Routes import `@/lib/server/paid-pass`,
+// which carries the `server-only` marker so the signing secret never reaches a
+// client bundle.
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 function secret(): string {
@@ -29,7 +31,11 @@ export interface PassClaims {
 /** Issue a pass valid for `ttlMs` from now. */
 export function issuePass(payer: string, plan: string, ttlMs: number): { pass: string; expiresAt: number } {
   const exp = Date.now() + ttlMs;
-  const body = `${payer.toLowerCase()}.${exp}.${plan}`;
+  // Stellar strkeys are case-sensitive base32 — bind the pass to the payer
+  // verbatim (trimmed). Lowercasing would yield a payer that is not a valid
+  // address when echoed back to the client.
+  const normalizedPayer = payer.trim();
+  const body = `${normalizedPayer}.${exp}.${plan}`;
   const pass = `${Buffer.from(body).toString("base64url")}.${sign(body)}`;
   return { pass, expiresAt: exp };
 }

@@ -50,7 +50,9 @@ async function run(body: unknown) {
 
 async function runWith(
   body: unknown,
-  moderateClaim: Parameters<typeof handleClaimModerationPost>[0]["moderateClaim"]
+  moderateClaim: Parameters<
+    typeof handleClaimModerationPost
+  >[0]["moderateClaim"],
 ) {
   return handleClaimModerationPost({
     request: makeRequest(body),
@@ -74,7 +76,7 @@ test("POST /api/claim-moderation: feature disabled returns 404", async () => {
 
   assert.equal(response.status, 404);
   const payload = await response.json();
-  assert.equal(payload?.error?.code, "feature_disabled");
+  assert.equal(payload?.error?.code, "not_found");
 });
 
 test("POST /api/claim-moderation: invalid request returns 400", async () => {
@@ -174,12 +176,9 @@ test("POST /api/claim-moderation: rate-limited upstream triggers 429 and cooldow
   };
   moderationResultCache.delete(hashModerationInput(body));
 
-  const response = await runWith(
-    body,
-    async () => {
-      throw new Error("Moderation request failed (429): RESOURCE_EXHAUSTED");
-    }
-  );
+  const response = await runWith(body, async () => {
+    throw new Error("Moderation request failed (429): RESOURCE_EXHAUSTED");
+  });
 
   assert.equal(response.status, 429);
   assert.equal(response.headers.get("Retry-After"), "35");
@@ -209,8 +208,7 @@ test("POST /api/claim-moderation: global cooldown returns 429 + Retry-After", as
   assert.equal(response.status, 429);
   assert.ok(Number(response.headers.get("Retry-After")) >= 1);
   const payload = await response.json();
-  assert.equal(payload?.error?.code, "claim_moderation_rate_limited");
+  assert.equal(payload?.error?.code, "rate_limited");
 
   setGlobalCooldownMs(0);
 });
-

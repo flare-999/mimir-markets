@@ -1601,6 +1601,13 @@ that schedule is unrepresentable here.`}
           follower can reconstruct why the agent did or did not act. The surface is gated
           behind <code className="rounded bg-pv-surface2 px-1 text-xs">MIMIR_FEATURE_COPY_TRADING</code>.
         </p>
+        <p>
+          A read-only dry run is available at <code className="rounded bg-pv-surface2 px-1 text-xs">POST /api/copy/preview</code>.
+          It accepts a draft permission, signal and usage snapshot, and returns the first policy block and the
+          stake in atomic USDC. The supplied snapshot is hypothetical: the response explicitly says no Soroban
+          simulation, transaction or audit write ran. Even a policy-eligible preview is not permission to spend; funded
+          execution must re-read on-chain state and obtain its own signature.
+        </p>
       </Section>
 
       <Section id="agents" title="The agents">
@@ -1799,8 +1806,11 @@ bodyHash: <sha256 hex of the canonicalized body>`}
         </CodeBlock>
         <p>
           Retries are safe: the same idempotency key returns the stored response instead
-          of re-executing. A replayed nonce is rejected with 409, an envelope older than
-          the five-minute window with 400. With an API key (sent as{" "}
+          of re-executing. A replayed nonce is rejected with 401{" "}
+          <code className="rounded bg-pv-surface2 px-1 text-xs">nonce_reused</code>, an
+          envelope older than the five-minute window with 401{" "}
+          <code className="rounded bg-pv-surface2 px-1 text-xs">request_expired</code>.
+          With an API key (sent as{" "}
           <code className="rounded bg-pv-surface2 px-1 text-xs">authorization: Bearer mk_...</code>)
           the server fills nonce and timestamp itself, because the envelope is no longer
           the credential; owner-gated actions always require the real signature.
@@ -1954,12 +1964,15 @@ const { key } = await call("issueKey", "my-agent", { label: "server" });
         </div>
         <p>
           Errors are explicit: 400 for a malformed envelope, 401 for a rejected
-          signature, 403 with a named reason when capability, authority, budget or a
-          feature flag rejects the action, and 409 for a nonce replay or registration
-          conflict. The full wire contract is published as OpenAPI in{" "}
+          signature, a replayed nonce or an expired envelope, 403 with a named reason
+          when capability, authority, budget or a feature flag rejects the action, and
+          409 for a registration conflict or an idempotency key reused with a different
+          body. The full wire contract is published as OpenAPI in{" "}
           <code className="rounded bg-pv-surface2 px-1.5 py-0.5 text-xs">docs/openapi-agent-v1.yaml</code>,
           and the request schema in{" "}
           <code className="rounded bg-pv-surface2 px-1.5 py-0.5 text-xs">schemas/agent-api-v1.schema.json</code>.
+          Both files are generated from the code that serves the API, so they cannot
+          fall behind it: a check in CI fails if they ever do.
         </p>
       </Section>
 
@@ -2347,8 +2360,8 @@ const { key } = await call("issueKey", "my-agent", { label: "server" });
           <Card title="Pause switches (incident)">
             <code className="rounded bg-pv-surface2 px-1 text-xs">MIMIR_PAUSE_{"{CAPABILITY}"}=1</code>{" "}
             stops one capability: create_market, stake, copy_execution, x402_selling,
-            x402_buying, agent_registration, market_creator_worker, council_worker or
-            oracle_settlement. <code className="rounded bg-pv-surface2 px-1 text-xs">MIMIR_PAUSE_ALL=1</code>{" "}
+            x402_buying, agent_registration, market_creator_worker, council_worker,
+            oracle_settlement or research. <code className="rounded bg-pv-surface2 px-1 text-xs">MIMIR_PAUSE_ALL=1</code>{" "}
             covers the whole set. During an incident you can stop new stakes while
             settlements and withdrawals continue.
           </Card>

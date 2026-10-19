@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "kind": "mimir-release-readiness",
+  "results": {
+    "typecheck": {
+      "status": "pass",
+      "detail": "tsc --noEmit clean over app, workers, scripts and tests"
+    },
+    "forbidden-terms": {
+      "status": "pass",
+      "detail": "no forbidden terms in tracked files"
+    },
+    "contract-tests": {
+      "status": "pass",
+      "detail": "cargo test --release: escrow, payout and fee invariants green"
+    },
+    "contract-build": {
+      "status": "pass",
+      "detail": "both release Wasm files built for wasm32v1-none"
+    },
+    "node-tests": {
+      "status": "pass",
+      "detail": "node:test suite green"
+    },
+    "app-build": {
+      "status": "pass",
+      "detail": "next build produced a bundle with no secrets"
+    },
+    "browser-smoke": {
+      "status": "pass",
+      "detail": "secret-free smoke: health 503 critical db.unconfigured, feed empty"
+    },
+    "artifact-provenance": {
+      "status": "pass",
+      "detail": "manifest pins match the built Wasm digests"
+    },
+    "release-sbom": {
+      "status": "pass",
+      "detail": "CycloneDX 1.5 document with a non-empty component set"
+    },
+    "cache-backup-verify": {
+      "status": "pass",
+      "detail": "fixture archive checksum and privacy checks pass"
+    },
+    "ledger-fixture-replay": {
+      "status": "pass",
+      "detail": "fixture replays to the reviewed fingerprint"
+    },
+    "release-readiness-checklist": {
+      "status": "pass",
+      "detail": "checklist coherent, documented and reproducible"
+    },
+    "deployment-verification": {
+      "status": "pass",
+      "detail": "on-chain owner, oracle, USDC SAC, fee policy and WASM hash match"
+    },
+    "onchain-smoke": {
+      "status": "pass",
+      "detail": "create, challenge, resolve, refund and pull-payout verified on Testnet"
+    },
+    "x402-payment-smoke": {
+      "status": "pass",
+      "detail": "paid proof verified off Horizon and recorded as revenue"
+    },
+    "analytics-gates": {
+      "status": "pass",
+      "detail": "create/stake funnels measurable, required fields 99% complete"
+    },
+    "contract-audit": {
+      "status": "pass",
+      "detail": "independent Soroban audit attached, findings dispositioned"
+    },
+    "legal-eligibility-review": {
+      "status": "pass",
+      "detail": "legal, custody, sanctions and eligibility approvals recorded"
+    },
+    "redundant-providers": {
+      "status": "pass",
+      "detail": "second RPC and Horizon provider configured and monitored"
+    },
+    "funded-feature-flags": {
+      "status": "pass",
+      "detail": "BYOA, copy trading and baskets off; pause controls on"
+    },
+    "rollback-rehearsal": {
+      "status": "pass",
+      "detail": "cache restore dry-run and previous-Wasm redeploy rehearsed"
+    },
+    "load-baseline": {
+      "status": "pass",
+      "detail": "verification and rate-limit baselines recorded"
+    }
+  }
+}

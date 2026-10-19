@@ -7,6 +7,7 @@
  */
 
 import { fetchWithBudget, payingWalletFor, type PayingWallet } from "../../../lib/x402/buyer";
+import { outboundTraceHeaders } from "../../../lib/ops/trace-http";
 import { getCouncilWallet } from "../../../lib/agent-wallets";
 import { usdcToUnits } from "../../../lib/usdc";
 import {
@@ -67,7 +68,7 @@ export async function buyPeerReasoning(args: {
   const payer = payingWalletForPersona(args.buyer);
   if (!payer) return [];
 
-  const capUnits = usdcToUnits(args.capUsdc);
+  let remainingUnits = usdcToUnits(args.capUsdc);
   const sellers = selectPeerSellers(
     args.buyer,
     args.activePersonas,
@@ -77,15 +78,19 @@ export async function buyPeerReasoning(args: {
   const reads: PeerReasoningRead[] = [];
 
   for (const seller of sellers) {
+    if (remainingUnits <= 0n) break;
+
     const url =
       `${args.baseUrl.replace(/\/$/, "")}/api/council/reasoning` +
       `?claimId=${encodeURIComponent(String(args.claimId))}` +
       `&persona=${encodeURIComponent(seller.slug)}`;
 
     try {
-      const result = await fetchWithBudget(url, payer, capUnits, {
+      // Trace header on the same request as the payment: a peer's paid read and
+      // the persona's decision cycle are one trace. Inert to the x402 proof.
+      const result = await fetchWithBudget(url, payer, remainingUnits, {
         method: "GET",
-        headers: { accept: "application/json" },
+        headers: { accept: "application/json", ...outboundTraceHeaders() },
       });
       if (!result.response.ok) continue;
 
@@ -99,6 +104,10 @@ export async function buyPeerReasoning(args: {
         reasoning: reasoning.slice(0, 360),
         pricePaidUnits: result.payment?.priceUnits?.toString() ?? null,
       });
+
+      if (result.payment) {
+        remainingUnits -= result.payment.priceUnits;
+      }
     } catch (err) {
       console.warn(
         `[council:${args.buyer.slug}] peer read failed from ${seller.slug}:`,

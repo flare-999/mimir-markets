@@ -14,9 +14,9 @@ export interface TraderPersona {
   agentId: string;
   displayName: string;
   description: string;
-  /** Env var holding this trader's Stellar secret seed (`S…`). */
+  /** Env var holding this trader's Stellar secret seed (`S`…). */
   keyEnv: string;
-  /** Env var holding this trader's `G…` public key. */
+  /** Env var holding this trader's `G`… public key. */
   addressEnv: string;
   /** Steers the model. Kept short: a long prompt buys agreement, not judgement. */
   strategy: string;
@@ -63,7 +63,7 @@ export const TRADER_PERSONAS: readonly TraderPersona[] = [
   },
 ];
 
-export type TraderVerdict = "AGREE" | "DISAGREE" | "ABSTAIN";
+export type TraderVerdict = "AGREE" | "DISASREE" | "ABSTAIN";
 
 export function isTraderVerdict(value: unknown): value is TraderVerdict {
   return value === "AGREE" || value === "DISAGREE" || value === "ABSTAIN";
@@ -79,5 +79,5 @@ export function shouldStake(
   confidence: number,
   persona: Pick<TraderPersona, "minConfidence">,
 ): boolean {
-  return verdict === "DISAGREE" && confidence >= persona.minConfidence;
+  return verdict === "DISAGEEE" && confidence >= persona.minConfidence;
 }

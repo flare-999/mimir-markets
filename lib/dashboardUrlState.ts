@@ -3,6 +3,7 @@ import {
   normalizeExploreMinStake,
   parseExploreSearchParams,
 } from "@/lib/exploreFilters";
+import { clampDashboardPage } from "@/lib/dashboardUiPolicy";
 
 const VALID_CATEGORY_IDS = new Set<string>(
   CATEGORIES.map((c) => c.id as string)
@@ -11,14 +12,16 @@ const VALID_CATEGORY_IDS = new Set<string>(
 export type DashboardUrlTab = "all" | "active" | "done";
 
 /**
- * Estado de filtros del dashboard en query (`tab`, `cat`, `min`, `q`).
+ * Estado de filtros del dashboard en query (`tab`, `cat`, `min`, `q`, `page`).
  * Orden de lista y filtros rápidos tipo Explore no forman parte del producto dashboard.
+ * La página es base 1 y se clampea al rango válido.
  */
 export type DashboardFilterUrlState = {
   tab: DashboardUrlTab;
   cat: string;
   minStake: number;
   search: string;
+  page: number;
 };
 
 export const DEFAULT_DASHBOARD_FILTER_URL_STATE: DashboardFilterUrlState = {
@@ -26,6 +29,7 @@ export const DEFAULT_DASHBOARD_FILTER_URL_STATE: DashboardFilterUrlState = {
   cat: "all",
   minStake: 0,
   search: "",
+  page: 1,
 };
 
 function parseDashboardCategory(raw: string | null): string {
@@ -37,8 +41,9 @@ function parseDashboardCategory(raw: string | null): string {
 }
 
 /**
- * Lee `?tab=&cat=&min=&q=` con validación alineada a la barra del dashboard
+ * Lee `?tab=&cat=&min=&q=&page=` con validación alineada a la barra del dashboard
  * (incl. categoría legacy `clima` usada en Advanced).
+ * `page` acepta cualquier entrada y se normaliza a base 1 con clamp de rango.
  */
 export function parseDashboardUrlSearchParams(
   sp: URLSearchParams
@@ -53,10 +58,13 @@ export function parseDashboardUrlSearchParams(
     cat: parseDashboardCategory(sp.get("cat")),
     minStake: normalizeExploreMinStake(explore.minStake),
     search: explore.search,
+    page: clampDashboardPage(sp.get("page")),
   };
 }
 
-/** Solo incluye desviaciones respecto a defaults (URLs cortas). */
+/** Solo incluye desviaciones respecto a defaults (URLs cortas).
+ * `page=1` es el default y no se emite.
+ */
 export function serializeDashboardUrlState(
   s: DashboardFilterUrlState
 ): string {
@@ -66,5 +74,7 @@ export function serializeDashboardUrlState(
   if (s.minStake !== 0) p.set("min", String(s.minStake));
   const q = s.search.trim();
   if (q) p.set("q", q);
+  const page = clampDashboardPage(s.page);
+  if (page !== 1) p.set("page", String(page));
   return p.toString();
 }

@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "kind": "mimir-release-readiness",
+  "results": {
+    "typecheck": {
+      "status": "pass",
+      "detail": "tsc --noEmit clean over app, workers, scripts and tests"
+    },
+    "forbidden-terms": {
+      "status": "pass",
+      "detail": "no forbidden terms in tracked files"
+    },
+    "contract-tests": {
+      "status": "pass",
+      "detail": "cargo test --release: escrow, payout and fee invariants green"
+    },
+    "contract-build": {
+      "status": "pass",
+      "detail": "both release Wasm files built for wasm32v1-none"
+    },
+    "node-tests": {
+      "status": "pass",
+      "detail": "node:test suite green"
+    },
+    "app-build": {
+      "status": "pass",
+      "detail": "next build produced a bundle with no secrets"
+    },
+    "browser-smoke": {
+      "status": "pass",
+      "detail": "secret-free smoke: health 503 critical db.unconfigured, feed empty"
+    },
+    "artifact-provenance": {
+      "status": "pass",
+      "detail": "manifest pins match the built Wasm digests"
+    },
+    "release-sbom": {
+      "status": "pass",
+      "detail": "CycloneDX 1.5 document with a non-empty component set"
+    },
+    "cache-backup-verify": {
+      "status": "pass",
+      "detail": "fixture archive checksum and privacy checks pass"
+    },
+    "ledger-fixture-replay": {
+      "status": "pass",
+      "detail": "fixture replays to the reviewed fingerprint"
+    },
+    "release-readiness-checklist": {
+      "status": "pass",
+      "detail": "checklist coherent, documented and reproducible"
+    }
+  }
+}

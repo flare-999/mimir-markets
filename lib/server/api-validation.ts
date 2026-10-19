@@ -6,6 +6,7 @@ export type ApiErrorShape = {
   error: {
     code: string;
     message: string;
+    requestId?: string;
   };
 };
 
@@ -38,9 +39,9 @@ export function parsePositiveIntegerParam(value: string | undefined): number | n
  * `C…` contract, because a claim's creator or challenger may be a smart-contract
  * account rather than a person's keypair.
  *
- * Returned VERBATIM, never normalised. Strkeys are case-sensitive base32, so the
- * `toLowerCase()` this function's EVM predecessor could safely apply would turn a
- * valid address into an invalid one here.
+ * Returned VERBATIM apart from surrounding whitespace, never case-normalised.
+ * Strkeys are case-sensitive base32, so the `toLowerCase()` this function's EVM
+ * predecessor could safely apply would turn a valid address into an invalid one.
  */
 export function parseAddressParam(value: string | undefined): string | null {
   const trimmed = value?.trim();
@@ -62,4 +63,72 @@ export function parseInviteKey(value: string | null): string | null {
   }
 
   return trimmed;
+}
+
+/**
+ * Parse an ISO 8601 timestamp string into a Date object.
+ *
+ * Used for validating expiration times on x402 quotes.
+ * Returns null if the timestamp is invalid or in the past (for immediate expiry checks).
+ */
+export function parseTimestampParam(value: string | undefined): Date | null {
+  if (!value) {
+    return null;
+  }
+
+  const date = new Date(value);
+  if (isNaN(date.getTime())) {
+    return null;
+  }
+
+  return date;
+}
+
+/**
+ * Validate that a quote expiration timestamp is in the future.
+ *
+ * x402 quotes must expire before verification to preserve contract-first accounting.
+ * This ensures that quotes cannot be used indefinitely and enforces clear market semantics.
+ *
+ * @param expiration - The expiration timestamp to validate
+ * @param now - Optional current time for testing; defaults to Date.now()
+ * @returns true if the expiration is valid (in the future), false otherwise
+ */
+export function isQuoteExpirationValid(expiration: Date | null, now?: number): boolean {
+  if (!expiration) {
+    return false;
+  }
+
+  const currentTime = now ?? Date.now();
+  const expirationTime = expiration.getTime();
+
+  // Quote must expire in the future to be valid
+  return expirationTime > currentTime;
+}
+
+/**
+ * Validate an x402 quote expiration timestamp from a string parameter.
+ *
+ * This function parses the timestamp and validates that it is in the future.
+ * It is used during quote creation and verification to ensure quotes expire
+ * before verification, preserving contract-first accounting and safe agent operations.
+ *
+ * @param value - The ISO 8601 timestamp string from the request parameter
+ * @param now - Optional current time for testing; defaults to Date.now()
+ * @returns The validated Date object if valid, null otherwise
+ */
+export function parseAndValidateQuoteExpiration(
+  value: string | undefined,
+  now?: number
+): Date | null {
+  const expiration = parseTimestampParam(value);
+  if (!expiration) {
+    return null;
+  }
+
+  if (!isQuoteExpirationValid(expiration, now)) {
+    return null;
+  }
+
+  return expiration;
 }

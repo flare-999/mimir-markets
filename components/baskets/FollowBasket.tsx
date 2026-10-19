@@ -10,26 +10,12 @@
 
 import { useState } from "react";
 
-import { FEE_SCHEDULE } from "@/lib/fees";
+import { FeeBreakdown } from "@/components/fees/FeeBreakdown";
 import { useWallet } from "@/lib/wallet";
+import { subscriptionMessage } from "@/lib/baskets";
 
-/**
- * Mirrors the server's message byte for byte.
- *
- * The address is interpolated VERBATIM. The EVM version lowercased it, which was
- * free there and is destructive here: a Stellar strkey is case-sensitive base32,
- * so a lowercased `G…` is a different (invalid) string and the signature would
- * never verify.
- */
-function subscribeMessage(args: { basketId: string; subscriber: string; perMarketUsdc: number }): string {
-  return [
-    "Mimir basket subscription",
-    `basket: ${args.basketId}`,
-    `subscriber: ${args.subscriber}`,
-    `per market: ${args.perMarketUsdc} USDC`,
-    "Mimir never holds your funds. Every stake is signed by you.",
-  ].join("\n");
-}
+/** How long a signed (un)subscribe stays acceptable; the server caps it at 5 min. */
+const SIGNATURE_TTL_MS = 2 * 60_000;
 
 export function FollowBasket({
   basketId, creatorWallet,
@@ -57,8 +43,17 @@ export function FollowBasket({
     setBusy(true);
     setError(null);
     try {
+      const nonce = crypto.randomUUID();
+      const expiresAt = Date.now() + SIGNATURE_TTL_MS;
       const signature = await signMessage(
-        subscribeMessage({ basketId, subscriber: address, perMarketUsdc: following ? 0 : perMarket }),
+        subscriptionMessage({
+          action: following ? "unsubscribe" : "subscribe",
+          basketId,
+          subscriber: address,
+          perMarketUsdc: following ? 0 : perMarket,
+          nonce,
+          expiresAt,
+        }),
       );
       const response = await fetch(`/api/baskets/${basketId}/subscribe`, {
         method: "POST",
@@ -68,6 +63,8 @@ export function FollowBasket({
           perMarketUsdc: following ? 0 : perMarket,
           unsubscribe: following,
           signature,
+          nonce,
+          expiresAt,
         }),
       });
       const payload = await response.json();
@@ -119,14 +116,8 @@ export function FollowBasket({
 
       {error && <p className="mt-2 text-[12px] text-pv-danger">{error}</p>}
 
-      <p className="mt-3 text-[11px] text-pv-muted">
-        On profit: {(FEE_SCHEDULE.platformBps / 100).toFixed(2)}% protocol,{" "}
-        {(FEE_SCHEDULE.agentOwnerBps / 100).toFixed(2)}% to the agents&apos; owners,{" "}
-        {isOwn
-          ? "and no basket fee — this basket is yours."
-          : `${(FEE_SCHEDULE.basketCreatorBps / 100).toFixed(2)}% to whoever composed it.`}{" "}
-        Losses are never charged.
-      </p>
+      <FeeBreakdown context="follow" isOwn={isOwn} />
     </div>
   );
 }
+

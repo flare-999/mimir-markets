@@ -1,0 +1,55 @@
+{
+  "auditReportVersion": 2,
+  "vulnerabilities": {
+    "picomatch": {
+      "name": "picomatch",
+      "severity": "moderate",
+      "isDirect": false,
+      "via": [
+        {
+          "source": 1100001,
+          "name": "picomatch",
+          "dependency": "picomatch",
+          "title": "Picomatch has a ReDoS in POSIX brace expansion",
+          "url": "https://github.com/advisories/GHSA-aaaa-bbbb-cccc",
+          "severity": "moderate",
+          "range": "<2.3.2"
+        }
+      ],
+      "effects": [],
+      "range": "<2.3.2",
+      "nodes": ["/home/runner/work/mimir/node_modules/picomatch"],
+      "fixAvailable": true
+    },
+    "debug": {
+      "name": "debug",
+      "severity": "low",
+      "isDirect": true,
+      "via": [
+        {
+          "source": 1100002,
+          "name": "debug",
+          "dependency": "debug",
+          "title": "debug uses a predictable namespace in logs",
+          "url": "https://github.com/advisories/GHSA-dddd-eeee-ffff",
+          "severity": "low",
+          "range": "<4.3.5"
+        }
+      ],
+      "effects": [],
+      "range": "<4.3.5",
+      "nodes": ["/home/runner/work/mimir/node_modules/debug"],
+      "fixAvailable": false
+    }
+  },
+  "metadata": {
+    "vulnerabilities": {
+      "info": 0,
+      "low": 1,
+      "moderate": 1,
+      "high": 0,
+      "critical": 0,
+      "total": 2
+    }
+  }
+}

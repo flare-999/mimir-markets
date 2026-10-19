@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { withRequestId } from "@/lib/api/errors";
 import { verifyAgentSignature } from "@/lib/agents/signature";
 import { isStellarAccount } from "@/lib/stellar-message";
 import { getUserVSDirect } from "@/lib/contract";
@@ -8,15 +9,17 @@ import {
   getMarketContractId,
   isContractAddress,
   isMarketConfigured,
+  validateNetworkPassphrase,
 } from "@/lib/stellar";
 import { publishReasoning } from "@/lib/reasoning/publish";
 import {
-  AGENT_API_ACTIONS, AGENT_API_VERSION, agentRequestMessage, validateAgentRequestEnvelope,
+  AGENT_ACTION_PAUSE, AGENT_API_ACTIONS, AGENT_API_VERSION, AGENT_FUNDED_ACTIONS, MAX_SIGNED_REQUEST_PAYLOAD_BYTES,
+  agentRequestMessage, operatorProofMessage, validateAgentRequestEnvelope,
   type AgentApiAction, type SignedAgentRequest,
 } from "@/lib/agents/api";
 import { authenticateAgentRequest, requiresOwnerSignature } from "@/lib/agents/authenticate";
 import {
-  apiKeyPrefix, generateApiKey, hashApiKey, type AgentApiKeyRecord,
+  apiKeyPrefix, generateApiKey, hashApiKey, parseOverlapMs, type AgentApiKeyRecord,
 } from "@/lib/agents/api-keys";
 import {
   configuredSpender, currentPeriodStart, evaluateSpend, parseSpendPermissionGrant,
@@ -24,17 +27,23 @@ import {
 } from "@/lib/agents/spend-permissions";
 import {
   getActiveSpendPermission, getSpentInPeriod, insertAgentApiKey, listAgentApiKeys,
-  revokeAgentApiKey, revokeSpendPermission, upsertSpendPermission,
+  revokeAgentApiKey, revokeSpendPermission, setAgentApiKeyExpiry, upsertSpendPermission,
 } from "@/lib/db";
 import {
   AUTHORITY_LEVELS, REGISTRY_SCHEMA_VERSION, authorizeAction, defaultLimits,
-  revokeAgent, type AgentRecord, type AgentCapability,
+  evaluateRegistrationReplay, revokeAgent, type AgentRecord, type AgentCapability,
 } from "@/lib/agents/registry";
-import { auditAgentRequest, consumeNonce, loadAgent, loadIdempotentResponse, saveAgent, saveIdempotentResponse } from "@/lib/agents/store";
+import { auditAgentRequest, loadAgent, loadIdempotentResponse, saveAgent, saveIdempotentResponse } from "@/lib/agents/store";
+import { rejectReplayedSignedEnvelope } from "@/lib/agents/envelope-replay";
 import { buildAgentDryRun } from "@/lib/agents/dry-run";
-import { isFeatureEnabled } from "@/lib/ops/flags";
+import { isFeatureEnabled, checkWriteAllowed, type Pausable } from "@/lib/ops/flags";
 import { getUsdcBalanceUnits, usdcToUnits, parseUsdcAtomic } from "@/lib/usdc";
 import { getAgentEarningsSummary } from "@/lib/db";
+import { validateAgentApiRequest, schemaVersionHeaders } from "@/lib/api/schema";
+import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
+import { apiError } from "@/lib/api/errors";
+import { tracedRoute } from "@/lib/ops/trace-http";
+import { fetchResearch, BudgetExhaustedError } from "@/lib/research/gateway";
 
 export const dynamic = "force-dynamic";
 
@@ -61,7 +70,33 @@ function normalizeWallet(value: string): string {
 }
 
 function json(body: unknown, status = 200): Response {
-  return Response.json(body, { status, headers: { "cache-control": "no-store" } });
+  return Response.json(body, { status, headers: { "cache-control": "no-store", ...schemaVersionHeaders() } });
+}
+
+/** Convert a structured ApiErrorResult from lib/api/errors into a Response. */
+/** Map an authorizeAction() rejection to the typed agent API error envelope. */
+function actionVerdictToError(
+  gate: { reason?: string; detail?: string },
+  capability: string,
+): import("@/lib/api/errors").ApiErrorResult {
+  switch (gate.reason) {
+    case "platform_paused":
+    case "paused":
+      return apiError("agent_paused", gate.detail ?? "Agent or platform is paused");
+    case "revoked":
+      return apiError("agent_revoked", gate.detail ?? "Agent has been revoked");
+    case "rate_limit_exceeded":
+      return apiError("rate_limited", gate.detail ?? "Rate limit exceeded");
+    case "missing_capability":
+    case "insufficient_authority":
+      return apiError("capability_missing", gate.detail ?? `Missing capability ${capability}`);
+    default:
+      return apiError("forbidden", gate.detail ?? gate.reason ?? "Action not authorized");
+  }
+}
+
+function errorResponse(err: import("@/lib/api/errors").ApiErrorResult): Response {
+  return Response.json(err.body, { status: err.status, headers: { ...err.headers, "cache-control": "no-store" } });
 }
 
 async function verify(address: string, message: string, signature: string): Promise<boolean> {
@@ -80,10 +115,18 @@ async function audit(request: SignedAgentRequest, outcome: string, reason?: stri
  * Actions that put an owner's USDC at risk. Gated on byoa_funded_actions so the
  * launch-gate document and the code agree: until an operator enables it, an agent
  * can register, read and dry-run but cannot move money.
+ *
+ * The list itself lives in `lib/agents/api.ts` because the published wire contract
+ * reads it from there — a second copy here and in the docs is a copy that drifts.
  */
-const FUNDED_ACTIONS: readonly AgentApiAction[] = ["createMarket", "stake", "vote"];
+const FUNDED_ACTIONS: readonly AgentApiAction[] = AGENT_FUNDED_ACTIONS;
 
 async function register(request: SignedAgentRequest<Record<string, any>>): Promise<Response> {
+  // Pause check first: "registration is paused" is more accurate than "not enabled"
+  // when the feature is on but the capability is temporarily stopped.
+  const pauseErr = gateOrPause({ feature: "byoa_registry", capability: "agent_registration" });
+  if (pauseErr) return errorResponse(pauseErr);
+
   if (!isFeatureEnabled("byoa_registry")) {
     return json({ error: { message: "agent registration is not enabled" } }, 403);
   }
@@ -97,12 +140,55 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   if (!(await verify(owner, agentRequestMessage(request), request.signature))) {
     return json({ error: { message: "owner signature rejected" } }, 401);
   }
-  const operatorProofMessage = `Mimir agent operator proof\nagent: ${request.agentId}\noperator: ${operator}`;
-  if (!(await verify(operator, operatorProofMessage, String(body.operatorSignature ?? "")))) {
+  const operatorProof = operatorProofMessage(request.agentId, operator);
+  if (!(await verify(operator, operatorProof, String(body.operatorSignature ?? "")))) {
     return json({ error: { message: "operator signature rejected" } }, 401);
   }
-  if (!(await consumeNonce(request.agentId, request.nonce, Date.now()))) return json({ error: { message: "nonce replay" } }, 409);
-  if (await loadAgent(request.agentId)) return json({ error: { message: "agent already registered" } }, 409);
+
+  // Safe client retries: same idempotency key returns the prior accepted body.
+  if (request.idempotencyKey) {
+    const prior = await loadIdempotentResponse(request.agentId, "register", request.idempotencyKey);
+    if (prior) return json(prior.body, prior.status);
+  }
+
+  const payoutWallet = isWalletAddress(normalizeWallet(String(body.payoutWallet ?? "")))
+    ? normalizeWallet(String(body.payoutWallet)) : owner;
+
+  // Duplicate register with the same wallets is success, not conflict — check
+  // identity BEFORE consuming the nonce so a retry of a successful admission is
+  // not rejected as "nonce replay".
+  const existing = await loadAgent(request.agentId);
+  if (existing) {
+    const replay = evaluateRegistrationReplay(existing, {
+      ownerWallet: owner, operatorWallet: operator, payoutWallet,
+    });
+    if (replay.ok) {
+      const payload = { agent: existing };
+      if (request.idempotencyKey) {
+        await saveIdempotentResponse(request.agentId, "register", request.idempotencyKey, payload, 200);
+      }
+      await audit(request, "registered_idempotent");
+      return json(payload);
+    }
+    await audit(request, "rejected", replay.reason);
+    return json({
+      error: {
+        message: "agent already registered",
+        reason: replay.reason,
+        detail: "a different owner, operator, or payout wallet claimed this agentId",
+      },
+    }, 409);
+  }
+
+  const registerReplay = await rejectReplayedSignedEnvelope({
+    agentId: request.agentId,
+    nonce: request.nonce,
+    signedAt: request.signedAt,
+  });
+  if (registerReplay) {
+    await audit(request, "rejected", "nonce_replay");
+    return errorResponse(registerReplay);
+  }
   const now = Date.now();
   const authority = Math.max(0, Math.min(4, Math.floor(Number(body.authorityLevel ?? 0)))) as AgentRecord["authorityLevel"];
   const requestedCapabilities = Array.isArray(body.capabilities) ? body.capabilities : [];
@@ -111,8 +197,7 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   const agent: AgentRecord = {
     schemaVersion: REGISTRY_SCHEMA_VERSION, agentId: request.agentId, ownerWallet: owner,
     operatorWallet: operator,
-    payoutWallet: isWalletAddress(normalizeWallet(String(body.payoutWallet ?? "")))
-      ? normalizeWallet(String(body.payoutWallet)) : owner,
+    payoutWallet,
     displayName: String(body.displayName ?? request.agentId).slice(0, 80),
     description: String(body.description ?? "").slice(0, 500),
     metadataUri: body.metadataUri ? String(body.metadataUri) : undefined,
@@ -126,8 +211,12 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
     authorizeAction(agent, { capability, positionUsdc: 0 }).allowed ||
     (capability === "market_creator" && authority >= AUTHORITY_LEVELS.PROPOSE));
   await saveAgent(agent);
+  const payload = { agent };
+  if (request.idempotencyKey) {
+    await saveIdempotentResponse(request.agentId, "register", request.idempotencyKey, payload, 200);
+  }
   await audit(request, "registered");
-  return json({ agent });
+  return json(payload);
 }
 
 function clientIp(req: Request): string | undefined {
@@ -135,12 +224,35 @@ function clientIp(req: Request): string | undefined {
   return forwarded?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || undefined;
 }
 
-export async function POST(req: Request, context: { params: Promise<{ action: string }> }): Promise<Response> {
+async function handleAgentApiPost(
+  req: Request,
+  context: { params: Promise<{ action: string }> },
+): Promise<Response> {
   const { action: rawAction } = await context.params;
-  if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) return json({ error: { message: "unknown action" } }, 404);
+  // Correlates the early rejections below, which happen before an agent is known.
+  const requestId = randomUUID();
+  if (!(AGENT_API_ACTIONS as readonly string[]).includes(rawAction)) {
+    return errorResponse(withRequestId(apiError("not_found", "unknown action"), requestId));
+  }
   const action = rawAction as AgentApiAction;
+  // Cap before parse: Content-Length is a cheap fail-closed gate; the body byte
+  // check below still applies when the header is absent or wrong.
+  const declared = Number(req.headers.get("content-length") ?? NaN);
+  if (Number.isFinite(declared) && declared > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
+    return json({
+      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes`, requestId },
+    }, 413);
+  }
+  let raw: string;
+  try { raw = await req.text(); }
+  catch { return json({ error: { message: "invalid body" } }, 400); }
+  if (new TextEncoder().encode(raw).length > MAX_SIGNED_REQUEST_PAYLOAD_BYTES) {
+    return json({
+      error: { message: `payload exceeds ${MAX_SIGNED_REQUEST_PAYLOAD_BYTES} bytes` },
+    }, 413);
+  }
   let request: SignedAgentRequest;
-  try { request = (await req.json()) as SignedAgentRequest; }
+  try { request = JSON.parse(raw) as SignedAgentRequest; }
   catch { return json({ error: { message: "invalid JSON" } }, 400); }
 
   // An API-key caller writes plain HTTP: `{ "body": {...} }` with the action in the
@@ -152,7 +264,7 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     ip: clientIp(req),
     claimedAgentId: typeof request.agentId === "string" && request.agentId ? request.agentId : undefined,
   });
-  if (auth.error) return Response.json(auth.error.body, { status: auth.error.status, headers: { ...auth.error.headers, "cache-control": "no-store" } });
+  if (auth.error) return Response.json(auth.error.body, { status: auth.error.status, headers: { ...auth.error.headers, "cache-control": "no-store", ...schemaVersionHeaders() } });
   const viaApiKey = auth.auth?.kind === "api_key";
 
   if (viaApiKey && auth.auth?.kind === "api_key") {
@@ -176,6 +288,16 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
   if (request.action !== action) return json({ error: { message: "action/path mismatch" } }, 400);
   const envelopeErrors = validateAgentRequestEnvelope(request, Date.now(), { requireSignature: !viaApiKey });
   if (envelopeErrors.length) return json({ error: { message: envelopeErrors.join("; ") } }, 400);
+
+  // Drift check: validate the request body shape against the schema spec.
+  const shapeResult = validateAgentApiRequest(request);
+  if (!shapeResult.ok) {
+    return json({ error: { message: "schema validation failed", details: shapeResult.errors } }, 400);
+  }
+  if (shapeResult.unexpected.length > 0) {
+    return json({ error: { message: "unexpected fields in request", details: shapeResult.unexpected } }, 400);
+  }
+
   if (action === "register") return register(request as SignedAgentRequest<Record<string, any>>);
 
   const agent = await loadAgent(request.agentId);
@@ -185,6 +307,18 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     if (!(await verify(signer, agentRequestMessage(request), request.signature))) {
       await audit(request, "rejected", "signature");
       return json({ error: { message: "signature rejected" } }, 401);
+    }
+    const { authorizeRequest } = await import("@/lib/api/policy");
+    const gate = authorizeRequest("registered_agent", {
+      route: `/api/agents/v1/${action}`,
+      wallet: signer,
+      agentId: agent.agentId,
+      signatureVerified: true,
+      ip: clientIp(req),
+    });
+    if (!gate.allowed && gate.error) {
+      await audit(request, "rejected", "rate_limited");
+      return errorResponse(gate.error);
     }
   }
   // A revoked agent keeps read access to its own records but does nothing else;
@@ -202,11 +336,25 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
       },
     }, 403);
   }
+  // After the feature check, as in checkWriteAllowed: "not enabled" is the truer
+  // answer for something that was never switched on. Before the idempotency replay,
+  // so a cached "allowed" cannot be served while the capability is paused.
+  const pauseCapability = AGENT_ACTION_PAUSE[action];
+  const pauseErr = pauseCapability ? gateOrPause({ capability: pauseCapability }) : null;
+  if (pauseErr) {
+    await audit(request, "rejected", "paused");
+    return errorResponse(pauseErr);
+  }
   const prior = await loadIdempotentResponse(agent.agentId, action, request.idempotencyKey);
   if (prior) return json(prior.body, prior.status);
-  if (!(await consumeNonce(agent.agentId, request.nonce, Date.now()))) {
+  const replayed = await rejectReplayedSignedEnvelope({
+    agentId: agent.agentId,
+    nonce: request.nonce,
+    signedAt: request.signedAt,
+  });
+  if (replayed) {
     await audit(request, "rejected", "nonce_replay");
-    return json({ error: { message: "nonce replay" } }, 409);
+    return errorResponse(replayed);
   }
 
   const body = (request.body ?? {}) as Record<string, any>;
@@ -215,14 +363,28 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     // Returned once. There is no endpoint that can show it again, which is the
     // point: a key readable from the API is a key readable from a stolen session.
     const key = generateApiKey(body.environment === "test" ? "test" : "live");
+    // Optional TTL in seconds. Absent means permanent (no expiry set).
+    let expiresAt: number | undefined;
+    if (body.ttl_seconds !== undefined && body.ttl_seconds !== null) {
+      const ttl = Number(body.ttl_seconds);
+      if (!Number.isFinite(ttl) || ttl <= 0) {
+        return json({ error: { message: "ttl_seconds must be a positive number" } }, 400);
+      }
+      expiresAt = Date.now() + Math.floor(ttl) * 1000;
+    }
+    const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    if (scopes && scopes.length === 0) {
+      return json({ error: { message: "Cannot issue a key with an empty scope set" } }, 400);
+    }
     const record: AgentApiKeyRecord = {
       keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(key),
       keyPrefix: apiKeyPrefix(key), label: String(body.label ?? "").slice(0, 80),
-      createdAt: Date.now(),
+      createdAt: Date.now(), expiresAt, scopes,
     };
     await insertAgentApiKey(record);
     result = {
       apiKey: key, keyId: record.keyId, prefix: record.keyPrefix, label: record.label,
+      expiresAt: record.expiresAt ?? null,
       note: "Store this now — it is not recoverable.",
       usage: `Authorization: Bearer ${record.keyPrefix}...`,
     };
@@ -231,7 +393,8 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     result = {
       keys: keys.map((k) => ({
         keyId: k.keyId, prefix: k.keyPrefix, label: k.label, createdAt: k.createdAt,
-        lastUsedAt: k.lastUsedAt ?? null, revokedAt: k.revokedAt ?? null,
+        lastUsedAt: k.lastUsedAt ?? null, expiresAt: k.expiresAt ?? null,
+        revokedAt: k.revokedAt ?? null,
       })),
     };
   } else if (action === "revokeKey") {
@@ -240,6 +403,63 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     const revoked = await revokeAgentApiKey(agent.agentId, keyId, Date.now(), String(body.reason ?? "owner revoked"));
     if (!revoked) return json({ error: { message: "key not found or already revoked" } }, 404);
     result = { keyId, revoked: true };
+  } else if (action === "rotateKey") {
+    // rotateKey is OWNER_SIGNED (same as issueKey/revokeKey): a key cannot
+    // authorize the rotation that retires it or mints its successor.
+    //
+    // Flow:
+    //   1. Validate the old keyId and overlap window.
+    //   2. Issue a fresh key and persist it.
+    //   3. Schedule the old key's expiry at now + overlap_ms.
+    //
+    // The old key keeps working through the overlap window so any running
+    // service that already has it can keep authenticating while the operator
+    // distributes the new credential. After the window closes, the old key
+    // silently returns "expired" from checkApiKeyRecord.
+    const keyId = String(body.keyId ?? "");
+    if (!keyId) return json({ error: { message: "keyId is required" } }, 400);
+
+    const overlapResult = parseOverlapMs(body.overlap_ms);
+    if (!overlapResult.ok) {
+      return json({ error: { message: overlapResult.error } }, 400);
+    }
+    const { overlapMs } = overlapResult;
+
+    // Issue the new key first — if the DB is unavailable we do nothing rather
+    // than scheduling an expiry on the old key without a replacement.
+    const newKey = generateApiKey(body.environment === "test" ? "test" : "live");
+    const scopes = Array.isArray(body.scopes) ? body.scopes.map(String) : undefined;
+    if (scopes && scopes.length === 0) {
+      return json({ error: { message: "Cannot issue a key with an empty scope set" } }, 400);
+    }
+    const newRecord: AgentApiKeyRecord = {
+      keyId: randomUUID(), agentId: agent.agentId, keyHash: hashApiKey(newKey),
+      keyPrefix: apiKeyPrefix(newKey), label: String(body.label ?? "").slice(0, 80),
+      createdAt: Date.now(), scopes,
+    };
+    await insertAgentApiKey(newRecord);
+
+    // Schedule the outgoing key's expiry. If the old keyId is not found (already
+    // revoked or belongs to a different agent), treat it as a non-fatal warning:
+    // the caller still gets a new key, and revocation already provides a stronger
+    // stop than expiry would have.
+    const now = Date.now();
+    const expiresAt = now + overlapMs;
+    const scheduled = await setAgentApiKeyExpiry(agent.agentId, keyId, expiresAt);
+
+    result = {
+      // New credential — store it now, it is not recoverable.
+      apiKey: newKey, keyId: newRecord.keyId, prefix: newRecord.keyPrefix, label: newRecord.label,
+      note: "Store this now — it is not recoverable.",
+      usage: `Authorization: Bearer ${newRecord.keyPrefix}...`,
+      // Outgoing key status.
+      rotated: {
+        keyId,
+        expiresAt: scheduled ? expiresAt : null,
+        overlapMs,
+        warning: scheduled ? undefined : "old key not found or already revoked; no expiry scheduled",
+      },
+    };
   } else if (action === "grantSpend") {
     const parsed = parseSpendPermissionGrant({
       agentId: agent.agentId, grant: body as SpendPermissionGrant,
@@ -304,8 +524,26 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
     await saveAgent(revoked.agent); result = { agent: revoked.agent };
   } else if (action === "publishReasoning") {
     const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
-    if (!gate.allowed) return json({ error: { message: gate.reason, detail: gate.detail } }, 403);
+    if (!gate.allowed) {
+      await audit(request, "rejected", gate.reason);
+      return errorResponse(actionVerdictToError(gate, "researcher"));
+    }
     result = await publishReasoning({ ...(body as any), agentId: agent.agentId });
+  } else if (action === "fetchResearch") {
+    const gate = authorizeAction(agent, { capability: "researcher", requestsThisHour: Number(body.requestsThisHour ?? 0) });
+    if (!gate.allowed) {
+      await audit(request, "rejected", gate.reason);
+      return errorResponse(actionVerdictToError(gate, "researcher"));
+    }
+    try {
+      result = await fetchResearch({ ...(body as any), agentId: agent.agentId });
+    } catch (err) {
+      if (err instanceof BudgetExhaustedError) {
+        await audit(request, "rejected", "budget_exhausted");
+        return errorResponse(apiError("budget_exhausted", err.message));
+      }
+      throw err;
+    }
   } else {
     const capability: AgentCapability = action === "proposeMarket" || action === "createMarket" || action === "dryRun"
       ? "market_creator" : "council_juror";
@@ -372,3 +610,9 @@ export async function POST(req: Request, context: { params: Promise<{ action: st
   await saveIdempotentResponse(agent.agentId, action, request.idempotencyKey, result);
   return json(result);
 }
+
+// Traced: this is the API an autonomous agent calls, and the failure it gets back
+// carries the id in its body (see `apiError`) and in the `x-mimir-trace-id`
+// header. A signature failure, a pause, and a 500 are all one grep away instead of
+// three log streams read by eye. See docs/TRACE_CORRELATION.md.
+export const POST = tracedRoute("api.agents.v1", handleAgentApiPost);

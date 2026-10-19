@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { useTranslations } from "next-intl";
 import { Link } from "@/i18n/navigation";
@@ -15,6 +15,11 @@ import {
   getVsXmtpUnavailableReason,
   isSampleVsIdForXmtp,
 } from "@/lib/xmtp/vs-chat-eligibility";
+import {
+  clearThreadRead,
+  isThreadUnread,
+  markThreadRead,
+} from "@/lib/xmtp/read-state";
 import { getVSTotalPot } from "@/lib/contract";
 import PageTransition, { AnimatedItem } from "@/components/PageTransition";
 import { Button, GlassCard } from "@/components/ui";
@@ -30,6 +35,7 @@ import {
   Ban,
   AlertCircle,
   MessageCircle,
+  Bell,
 } from "lucide-react";
 
 function truncateQuestion(q: string, max = 72): string {
@@ -134,6 +140,18 @@ export default function MessagesHub() {
   const [selectedVsId, setSelectedVsId] = useState<number | null>(null);
   const hubChatPanelRef = useRef<HTMLDivElement>(null);
 
+  const [readTick, setReadTick] = useState(0);
+
+  const markRead = useCallback((vsId: number) => {
+    markThreadRead(vsId, Date.now());
+    setReadTick((n) => n + 1);
+  }, []);
+
+  const clearRead = useCallback((vsId: number) => {
+    clearThreadRead(vsId);
+    setReadTick((n) => n + 1);
+  }, []);
+
   const selectedVs = useMemo(
     () => duels.find((d) => d.id === selectedVsId) ?? null,
     [duels, selectedVsId]
@@ -145,6 +163,12 @@ export default function MessagesHub() {
       setSelectedVsId(null);
     }
   }, [duels, selectedVsId]);
+
+  useEffect(() => {
+    if (selectedVsId == null) return;
+    markThreadRead(selectedVsId, Date.now());
+    setReadTick((n) => n + 1);
+  }, [selectedVsId]);
 
   useEffect(() => {
     if (selectedVsId == null) return;
@@ -164,6 +188,15 @@ export default function MessagesHub() {
     (hubListTab === "active" || other.length === 0);
   const showPendingInColumn =
     other.length > 0 && (hubListTab === "pending" || eligible.length === 0);
+
+  const unreadByVsId = useMemo(() => {
+    void readTick;
+    const map = new Map<number, boolean>();
+    for (const vs of eligible) {
+      map.set(vs.id, isThreadUnread(vs.id));
+    }
+    return map;
+  }, [eligible, readTick]);
 
   if (!featureOn) {
     return (
@@ -378,6 +411,7 @@ export default function MessagesHub() {
                           const vsPageHref = `/vs/${vs.id}#${VS_XMTP_CHAT_ANCHOR_ID}`;
                           const pot = getVSTotalPot(vs);
                           const isSelected = selectedVsId === vs.id;
+                          const isUnread = unreadByVsId.get(vs.id) === true;
                           return (
                             <li key={vs.id}>
                               <motion.div
@@ -403,7 +437,10 @@ export default function MessagesHub() {
                                     aria-label={t("hubSelectThreadAria", {
                                       id: vs.id,
                                     })}
-                                    onClick={() => setSelectedVsId(vs.id)}
+                                    onClick={() => {
+                                      setSelectedVsId(vs.id);
+                                      markRead(vs.id);
+                                    }}
                                     className={`focus-ring w-full px-5 pb-4 pt-5 text-left outline-none transition-colors sm:px-6 ${
                                       isSelected
                                         ? ""
@@ -414,10 +451,23 @@ export default function MessagesHub() {
                                       <span className="font-display text-sm font-bold tabular-nums tracking-tight text-pv-emerald sm:text-[15px]">
                                         VS #{vs.id}
                                       </span>
-                                      <span className="inline-flex shrink-0 items-center gap-1 rounded border border-pv-emerald/30 bg-pv-emerald/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest text-pv-emerald">
-                                        <Zap size={10} aria-hidden />
-                                        {t("badgeLive")}
-                                      </span>
+                                      <div className="flex shrink-0 items-center gap-1.5">
+                                        {isUnread ? (
+                                          <span
+                                            className="inline-flex items-center gap-1 rounded border border-pv-gold/40 bg-pv-gold/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest text-pv-gold"
+                                            aria-label={t("unreadBadgeAria", {
+                                              id: vs.id,
+                                            })}
+                                          >
+                                            <Bell size={10} aria-hidden />
+                                            {t("unreadBadge")}
+                                          </span>
+                                        ) : null}
+                                        <span className="inline-flex items-center gap-1 rounded border border-pv-emerald/30 bg-pv-emerald/10 px-2 py-0.5 text-[9px] font-bold uppercase tracking-widest text-pv-emerald">
+                                          <Zap size={10} aria-hidden />
+                                          {t("badgeLive")}
+                                        </span>
+                                      </div>
                                     </div>
                                     <p className="mt-2 line-clamp-2 text-sm font-medium leading-snug text-pv-text">
                                       {truncateQuestion(vs.question)}
@@ -437,6 +487,15 @@ export default function MessagesHub() {
                                     </div>
                                   </button>
                                   <div className="flex justify-end border-t border-pv-border/25 px-5 py-3 sm:px-6">
+                                    {isUnread ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => clearRead(vs.id)}
+                                        className="focus-ring mr-auto inline-flex min-h-[44px] items-center gap-1 rounded-md font-display text-[10px] font-bold uppercase tracking-[0.14em] text-pv-muted transition-colors hover:text-pv-text"
+                                      >
+                                        {t("markRead")}
+                                      </button>
+                                    ) : null}
                                     <Link
                                       href={vsPageHref}
                                       className="group focus-ring inline-flex min-h-[44px] items-center gap-1 rounded-md font-display text-[10px] font-bold uppercase tracking-[0.14em] text-pv-emerald transition-colors hover:text-pv-emerald/85"
