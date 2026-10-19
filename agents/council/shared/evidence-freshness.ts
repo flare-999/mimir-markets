@@ -41,9 +41,7 @@
 
 import { RESEARCH_ADAPTERS } from "../../../lib/research/adapters";
 import type { EvidenceCacheEntry } from "./types";
-
-/** Default cap on the number of persisted evidence-cache entries. */
-export const COUNCIL_EVIDENCE_CACHE_MAX_ENTRIES = 500;
+import { validateEvidenceIntegrity } from "./evidence-integrity";
 
 /** 10 minutes — tighter than the oracle's 15-min commitment window. */
 export const COUNCIL_DEFAULT_MAX_EVIDENCE_AGE_MS = 10 * 60_000;
@@ -156,133 +154,31 @@ export function checkEvidenceFreshness(
 }
 
 /**
- * A persisted evidence-cache entry: the fetched evidence plus the claim id and
- * URL it was keyed by, so we can evict entries for claims that are no longer
- * joinable.
- */
-export interface PersistedEvidenceEntry {
-  claimId:   string;
-  url:       string;
-  entry:     EvidenceCacheEntry;
-  fetchedAt: number;
-}
-
-/**
- * Module-level cache keyed by `claimId + "\u0000" + url`.  Persists across
- * council cycles so the same resolution URL is not refetched every poll.
+ * Determine whether a cached entry may be reused for `claimId`/`url` at `now`.
  *
- * Bounded by `COUNCIL_EVIDENCE_CACHE_MAX_ENTRIES`; when the cap is exceeded the
- * oldest entries (by `fetchedAt`) are evicted first.
+ * This is the single predicate the persistent council evidence cache uses to
+ * decide between reusing an entry and refetching.  It combines the freshness
+ * gate above with an integrity check so a corrupted or tampered entry is never
+ * served from the cache even if it is still within its freshness window.
+ *
+ * Returns `{ fresh: true }` only when the entry is both fresh and valid.
  */
-const evidenceCache = new Map<string, PersistedEvidenceEntry>();
-
-function cacheKey(claimId: string, url: string): string {
-  return `${claimId}\u0000${url}`;
-}
-
-/**
- * Evict entries whose claim id is not in `joinableClaimIds`.  Call once per
- * cycle with the set of claims that are still joinable so memory does not grow
- * unbounded as claims resolve.
- */
-export function evictNonJoinableClaims(joinableClaimIds: Iterable<string>): void {
-  const keep = new Set(joinableClaimIds);
-  for (const [key, value] of evidenceCache) {
-    if (!keep.has(value.claimId)) {
-      evidenceCache.delete(key);
-    }
-  }
-}
-
-/**
- * Enforce the entry cap by dropping the oldest entries (smallest `fetchedAt`).
- */
-function enforceCacheCap(): void {
-  const max = COUNCIL_EVIDENCE_CACHE_MAX_ENTRIES;
-  if (max <= 0 || evidenceCache.size <= max) return;
-
-  const sorted = [...evidenceCache.entries()].sort(
-    (a, b) => a[1].fetchedAt - b[1].fetchedAt,
-  );
-  const excess = evidenceCache.size - max;
-  for (let i = 0; i < excess; i++) {
-    evidenceCache.delete(sorted[i][0]);
-  }
-}
-
-/**
- * Return a cached entry for `claimId` + `url` when it is younger than
- * `maxAgeForCategory(category)` and passes `validateEvidenceIntegrity`.
- * Otherwise return `undefined` (caller should refetch).
- */
-export function getFreshCachedEvidence(
-  claimId:  string,
-  url:      string,
+export function isCacheEntryReusable(
+  entry: EvidenceCacheEntry,
   category: string | undefined | null,
-  now:      number = Date.now(),
-): EvidenceCacheEntry | undefined {
-  const key = cacheKey(claimId, url);
-  const cached = evidenceCache.get(key);
-  if (cached === undefined) return undefined;
+  now: number = Date.now(),
+): EvidenceFreshnessResult {
+  const freshness = checkEvidenceFreshness(entry, category, now);
+  if (!freshness.fresh) return freshness;
 
-  const freshness = checkEvidenceFreshness(cached.entry, category, now);
-  if (!freshness.fresh) {
-    evidenceCache.delete(key);
-    return undefined;
+  if (!validateEvidenceIntegrity(entry)) {
+    return {
+      fresh:    false,
+      ageMs:    entry.fetchedAt !== undefined ? Math.max(0, now - entry.fetchedAt) : 0,
+      maxAgeMs: maxAgeForCategory(category),
+      reason:   "cached evidence failed integrity validation; treating as stale",
+    };
   }
 
-  if (!validateEvidenceIntegrity(cached.entry)) {
-    evidenceCache.delete(key);
-    return undefined;
-  }
-
-  return cached.entry;
-}
-
-/**
- * Store a fetched entry for `claimId` + `url`, stamping `fetchedAt` when the
- * entry does not already carry one.  Enforces the entry cap after insertion.
- */
-export function setCachedEvidence(
-  claimId:  string,
-  url:      string,
-  entry:    EvidenceCacheEntry,
-  now:      number = Date.now(),
-): void {
-  const fetchedAt = entry.fetchedAt ?? now;
-  const stamped: EvidenceCacheEntry = entry.fetchedAt === undefined
-    ? { ...entry, fetchedAt }
-    : entry;
-
-  evidenceCache.set(cacheKey(claimId, url), {
-    claimId,
-    url,
-    entry:     stamped,
-    fetchedAt,
-  });
-  enforceCacheCap();
-}
-
-/** Clear the persisted cache (test helper). */
-export function clearEvidenceCache(): void {
-  evidenceCache.clear();
-}
-
-/** Current number of persisted entries (test helper). */
-export function evidenceCacheSize(): number {
-  return evidenceCache.size;
-}
-
-/**
- * Minimal integrity check for a cached entry.  Rejects entries that are clearly
- * malformed so we never hand a corrupt payload to a persona.
- */
-function validateEvidenceIntegrity(entry: EvidenceCacheEntry): boolean {
-  if (entry === null || typeof entry !== "object") return false;
-  if (typeof entry.fetcher !== "string") return false;
-  if (entry.fetcher === "none") return false;
-  if (entry.fetchedAt !== undefined) {
-    if (!Number.isFinite(entry.fetchedAt) || entry.fetchedAt <= 0) return false;
-  }
-  return true;
+  return { fresh: true };
 }
