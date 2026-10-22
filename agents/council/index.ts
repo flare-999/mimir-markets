@@ -75,6 +75,7 @@ import {
 import { runPersonaForClaim } from "./shared/persona-runner";
 import { buyPeerReasoning } from "./shared/peer-reasoning";
 import { toClaimOnChain } from "./shared/types";
+import { maxAgeForCategory, validateEvidenceIntegrity } from "./shared/evidence-freshness";
 import type {
   ClaimOnChain,
   PersonaRunnerContext,
@@ -97,6 +98,14 @@ const PEER_READS_PER_PERSONA = Number(process.env.COUNCIL_PEER_READS_PER_PERSONA
 const PEER_READ_DELAY_MS   = Number(process.env.COUNCIL_PEER_READ_DELAY_MS ?? 15000);
 const PEER_READ_CAP_USDC   = Number(process.env.COUNCIL_PEER_READ_CAP_USDC ?? "0.003");
 const CONTRACT_ID          = requireMarketContractId();
+
+/**
+ * Upper bound on the module-level evidence cache so a long-running worker
+ * cannot grow unbounded. Entries are evicted (oldest first) once the cap
+ * is reached, and any entry for a claim that is no longer joinable is
+ * dropped each cycle.
+ */
+const EVIDENCE_CACHE_MAX_ENTRIES = Number(process.env.COUNCIL_EVIDENCE_CACHE_MAX ?? 500);
 
 // ── Env guard ─────────────────────────────────────────────────────────────────
 requireAnyLLMKey();
@@ -188,6 +197,91 @@ export function selectJoinableClaims(claims: ClaimOnChain[], now: number): Claim
   );
 }
 
+// ── Persistent evidence cache ─────────────────────────────────────────────────
+/**
+ * Module-level evidence cache shared across poll cycles.
+ *
+ * Keyed by `${claimId}:${url}` so a claim can accumulate multiple evidence
+ * entries (one per resolution URL) and each is freshness-checked
+ * independently. Entries carry `fetchedAt` (ms since epoch) so reuse can be
+ * gated on `maxAgeForCategory(category)`.
+ *
+ * The cache is intentionally NOT shared with the oracle process — that is
+ * out of scope for this change.
+ */
+const persistentEvidenceCache = new Map<string, EvidenceCacheEntry>();
+
+function evidenceCacheKey(claimId: number, url: string): string {
+  return `${claimId}:${url}`;
+}
+
+/**
+ * Drop entries whose claim is no longer joinable, then trim to the configured
+ * cap by evicting the oldest `fetchedAt` entries first. Called once per cycle
+ * before the persona loop so memory stays bounded across long runs.
+ */
+export function pruneEvidenceCache(
+  cache: Map<string, EvidenceCacheEntry>,
+  joinableClaimIds: Set<number>,
+  now: number,
+  maxEntries: number = EVIDENCE_CACHE_MAX_ENTRIES,
+): void {
+  for (const [key, entry] of cache) {
+    const claimId = Number(key.slice(0, key.indexOf(":")));
+    if (!joinableClaimIds.has(claimId)) {
+      cache.delete(key);
+      continue;
+    }
+    // Also drop entries that are already stale — they would be refetched
+    // anyway, so keeping them only wastes memory.
+    const maxAgeMs = maxAgeForCategory(entry.category) * 1000;
+    if (now - entry.fetchedAt > maxAgeMs) {
+      cache.delete(key);
+    }
+  }
+  if (cache.size <= maxEntries) return;
+  const sorted = [...cache.entries()].sort((a, b) => a[1].fetchedAt - b[1].fetchedAt);
+  const excess = cache.size - maxEntries;
+  for (let i = 0; i < excess; i++) {
+    cache.delete(sorted[i][0]);
+  }
+}
+
+/**
+ * Return a cached entry when it is still fresh and passes integrity checks;
+ * otherwise return null so the caller refetches. Exported for unit tests.
+ */
+export function getFreshCachedEvidence(
+  cache: Map<string, EvidenceCacheEntry>,
+  claimId: number,
+  url: string,
+  now: number,
+): EvidenceCacheEntry | null {
+  const entry = cache.get(evidenceCacheKey(claimId, url));
+  if (!entry) return null;
+  const maxAgeMs = maxAgeForCategory(entry.category) * 1000;
+  if (now - entry.fetchedAt > maxAgeMs) return null;
+  if (!validateEvidenceIntegrity(entry)) return null;
+  return entry;
+}
+
+/**
+ * Store an entry in the persistent cache, stamping `fetchedAt` if the caller
+ * did not already set it. Exported for unit tests.
+ */
+export function putCachedEvidence(
+  cache: Map<string, EvidenceCacheEntry>,
+  claimId: number,
+  url: string,
+  entry: EvidenceCacheEntry,
+  now: number,
+): void {
+  cache.set(evidenceCacheKey(claimId, url), {
+    ...entry,
+    fetchedAt: entry.fetchedAt ?? now,
+  });
+}
+
 // ── Poll loop ─────────────────────────────────────────────────────────────────
 async function poll(): Promise<void> {
   const now = Math.floor(Date.now() / 1000);
@@ -211,9 +305,9 @@ async function poll(): Promise<void> {
     `\n[council] ── Poll at ${new Date().toISOString()} ── ${total} claims, ${ACTIVE_PERSONAS.length} personas`,
   );
 
-  // Shared per-cycle evidence cache — one HTTP fetch per claim no matter
-  // how many personas need it.
-  const evidenceCache = new Map<number, EvidenceCacheEntry>();
+  // Persistent evidence cache — survives across cycles so the same resolution
+  // URL is not refetched within its category freshness window.
+  const evidenceCache = persistentEvidenceCache;
   const peerReasoning = new Map<string, string[]>();
   const ctx: PersonaRunnerContext = {
     contractId: CONTRACT_ID,
@@ -237,6 +331,10 @@ async function poll(): Promise<void> {
     console.log("[council] No joinable claims this round.");
     return;
   }
+
+  // Evict entries for claims that are no longer joinable and trim to the cap.
+  const joinableIds = new Set(allClaims.map((c) => c.id));
+  pruneEvidenceCache(evidenceCache, joinableIds, now);
 
   // Focus on claims closest to settling — they're the most interesting for
   // the council to weigh in on and keeps LLM-call volume bounded.
