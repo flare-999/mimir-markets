@@ -68,9 +68,7 @@ import { findBasketDefinition } from "@/lib/server/basket-directory";
 
 export const dynamic = "force-dynamic";
 
-function clientIp(req: NextRequest): string | undefined {
-  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
-}
+import { clientIpFrom } from "@/lib/api/origin";
 
 export async function PATCH(
   req: NextRequest,
@@ -78,7 +76,7 @@ export async function PATCH(
 ) {
   const { id } = await context.params;
 
-  const gate = await authorizeRequest("public_read", { route: "/api/baskets/transfer", ip: clientIp(req) });
+  const gate = authorizeRequest("public_read", { route: "/api/baskets/transfer", ip: clientIpFrom(req.headers) });
   if (!gate.allowed && gate.error) {
     return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
   }

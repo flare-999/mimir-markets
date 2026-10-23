@@ -285,6 +285,15 @@ function isClaimFinal(state: string) {
   return state === "resolved" || state === "cancelled";
 }
 
+function sortToOrderBy(sort: VsSort | undefined): ClaimFilters["orderBy"] {
+  switch (sort) {
+    case "expiring": return "deadline_asc";
+    case "updated": return "updated_desc";
+    case "newest":
+    default: return "id_desc";
+  }
+}
+
 function isFresh(updatedAt: number, thresholdMs: number) {
   return Date.now() - updatedAt <= thresholdMs;
 }
@@ -832,14 +841,30 @@ export async function reconcileVsIndex(): Promise<ReconcileResult> {
   };
 }
 
+export type VsSort = "newest" | "expiring" | "updated";
+
+export interface VsFeedOptions {
+  forceRefresh?: boolean;
+  cursor?: number;
+  limit?: number;
+  category?: string;
+  states?: string[];
+  creator?: string;
+  sort?: VsSort;
+}
+
 export async function getVsFeedSnapshot(
-  options: { forceRefresh?: boolean; cursor?: number; limit?: number } = {}
+  options: VsFeedOptions = {}
 ): Promise<VSFeedSnapshot> {
   try {
-    const { cursor, limit = 50 } = options;
+    const { forceRefresh = false, cursor, limit = 50, category, states, creator, sort } = options;
+    const orderBy = sortToOrderBy(sort);
     const rows = await getClaimsByFilter({
       visibility: "public",
-      orderBy: "id_desc",
+      category: category ? [category] : undefined,
+      states,
+      creator,
+      orderBy,
       cursor,
       limit: limit + 1, // Fetch one extra to determine if there's a next page
     });
@@ -847,26 +872,29 @@ export async function getVsFeedSnapshot(
     const hasMore = rows.length > limit;
     const paginatedRows = hasMore ? rows.slice(0, limit) : rows;
     const nextCursor = hasMore ? paginatedRows[paginatedRows.length - 1].id : null;
-
+    
     const lastSyncAt = Number((await getSyncMeta("last_sync_at")) ?? "0");
     const shouldRefresh =
-      options.forceRefresh ||
+      forceRefresh ||
       rows.length === 0 ||
       !lastSyncAt ||
       !isFresh(lastSyncAt, LIST_FRESHNESS_MS);
-
-    if (options.forceRefresh || rows.length === 0) {
+    
+    if (forceRefresh || rows.length === 0) {
       await reconcileVsIndex();
       const refreshedRows = await getClaimsByFilter({
         visibility: "public",
-        orderBy: "id_desc",
+        category: category ? [category] : undefined,
+        states,
+        creator,
+        orderBy,
         cursor,
         limit: limit + 1,
       });
       const refreshedHasMore = refreshedRows.length > limit;
       const refreshedPaginatedRows = refreshedHasMore ? refreshedRows.slice(0, limit) : refreshedRows;
       const refreshedNextCursor = refreshedHasMore ? refreshedPaginatedRows[refreshedPaginatedRows.length - 1].id : null;
-
+    
       return {
         items: refreshedPaginatedRows.map((row) => claimRowToVSData(row)),
         cache: buildVSCacheFreshness({
@@ -877,11 +905,11 @@ export async function getVsFeedSnapshot(
         nextCursor: refreshedNextCursor,
       };
     }
-
+    
     if (shouldRefresh) {
       refreshVsIndexInBackground();
     }
-
+    
     return {
       items: paginatedRows.map((row) => claimRowToVSData(row)),
       cache: await buildListCacheFreshness(paginatedRows),
@@ -891,7 +919,7 @@ export async function getVsFeedSnapshot(
     // Silent before: a DB outage (unset/expired DATABASE_URL, paused Neon) here
     // makes markets + stats + revenue all go dark with zero log. Surface it.
     console.error("[vs-index] getVsFeedSnapshot DB read failed:", err instanceof Error ? err.message : err);
-    if (options.forceRefresh) {
+    if (forceRefresh) {
       return {
         items: (await refreshVSIndex()).items,
         cache: makeContractFreshness(),

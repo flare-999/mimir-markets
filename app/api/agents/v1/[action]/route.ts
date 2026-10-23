@@ -43,6 +43,7 @@ import { validateAgentApiRequest, schemaVersionHeaders } from "@/lib/api/schema"
 import { gateOrPause, pausedCapabilityError, getCapabilityPauseDetail } from "@/lib/server/pause-registry";
 import { apiError } from "@/lib/api/errors";
 import { tracedRoute } from "@/lib/ops/trace-http";
+import { clientIpFrom } from "@/lib/api/origin";
 import { fetchResearch, BudgetExhaustedError } from "@/lib/research/gateway";
 
 export const dynamic = "force-dynamic";
@@ -208,11 +209,6 @@ async function register(request: SignedAgentRequest<Record<string, any>>): Promi
   return json(payload);
 }
 
-function clientIp(req: Request): string | undefined {
-  const forwarded = req.headers.get("x-forwarded-for");
-  return forwarded?.split(",")[0]?.trim() || req.headers.get("x-real-ip") || undefined;
-}
-
 async function handleAgentApiPost(
   req: Request,
   context: { params: Promise<{ action: string }> },
@@ -250,7 +246,7 @@ async function handleAgentApiPost(
   const auth = await authenticateAgentRequest({
     action,
     authorization: req.headers.get("authorization"),
-    ip: clientIp(req),
+    ip: clientIpFrom(req.headers),
     claimedAgentId: typeof request.agentId === "string" && request.agentId ? request.agentId : undefined,
   });
   if (auth.error) return Response.json(auth.error.body, { status: auth.error.status, headers: { ...auth.error.headers, "cache-control": "no-store", ...schemaVersionHeaders() } });
@@ -303,7 +299,7 @@ async function handleAgentApiPost(
       wallet: signer,
       agentId: agent.agentId,
       signatureVerified: true,
-      ip: clientIp(req),
+      ip: clientIpFrom(req.headers),
     });
     if (!gate.allowed && gate.error) {
       await audit(request, "rejected", "rate_limited");

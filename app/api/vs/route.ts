@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 
 import { apiError } from "@/lib/api/errors";
-import { getVsFeedSnapshot } from "@/lib/server/vs-index";
+import { CATEGORIES } from "@/lib/constants";
+import { getVsFeedSnapshot, type VsFeedOptions, type VsSort } from "@/lib/server/vs-index";
 import { VS_CACHE_HEADERS } from "@/lib/server/vs-cache";
 
 export const dynamic = "force-dynamic";
@@ -40,32 +41,19 @@ export async function GET(request: Request) {
       return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
     }
     const { searchParams } = new URL(request.url);
-    const refreshValue = searchParams.get("refresh");
-    const cursorValue = searchParams.get("cursor");
-    const limitValue = searchParams.get("limit");
-
-    if (refreshValue && refreshValue !== "1") {
-      const err = apiError("invalid_request", "refresh must be 1 when provided", { field: "refresh" });
-      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
+    const parsed = parseVsListParams(searchParams);
+    if (parsed.kind === "error") {
+      return NextResponse.json(parsed.body, { status: parsed.status, headers: parsed.headers });
     }
-
-    const shouldRefresh = refreshValue === "1";
-    const cursor = cursorValue ? Number(cursorValue) : undefined;
-    const limit = limitValue ? Number(limitValue) : undefined;
-
-    if (cursor !== undefined && (isNaN(cursor) || cursor <= 0)) {
-      const err = apiError("invalid_request", "cursor must be a positive integer", { field: "cursor" });
-      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
-    }
-    if (limit !== undefined && (isNaN(limit) || limit <= 0 || limit > 100)) {
-      const err = apiError("invalid_request", "limit must be between 1 and 100", { field: "limit" });
-      return NextResponse.json(err.body, { status: err.status, headers: err.headers });
-    }
-
+    const { forceRefresh, cursor, limit, category, states, creator, sort } = parsed.params;
     const { items, cache, nextCursor } = await getVsFeedSnapshot({
-      forceRefresh: shouldRefresh,
+      forceRefresh,
       cursor,
       limit,
+      category,
+      states,
+      creator,
+      sort,
     });
 
     const maxUpdatedAt = resolveMaxUpdatedAt(items as Array<Record<string, unknown>>);

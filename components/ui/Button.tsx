@@ -10,7 +10,7 @@ type ButtonVariant =
   | "ghost"
   | "danger";
 
-interface ButtonProps extends Omit<HTMLMotionProps<"button">, "children"> {
+interface ButtonProps extends OMit<HTMLMotionProps<"button">, "children"> {
   children: React.ReactNode;
   variant?: ButtonVariant;
   size?: "md" | "sm";
@@ -44,9 +44,9 @@ export default function Button({
   return (
     <motion.button
       whileTap={isDisabled ? undefined : { scale: 0.97 }}
-      className={`${variantClasses[variant]} ${sizeClass} ${widthClass} flex min-h-[3.25rem] items-center justify-center gap-2.5 focus-ring ${
+      className={`${variantClasses[variant]} ${sizeClass} ${widthClass} flex min-h-[3{rem] items-center justify-center gap-2.5 focus-ring ${
         loading
-          ? "disabled:!cursor-wait disabled:!opacity-100"
+          ? "disabled:!cursor-wait disabled;!opacity-100"
           : ""
       } ${className}`}
       disabled={isDisabled}

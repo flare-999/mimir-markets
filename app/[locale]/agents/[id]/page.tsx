@@ -7,6 +7,7 @@ import { AgentAvatar } from "@/components/agents/AgentAvatar";
 import { Bps, SignedUsdc, StatBlock, TimeWindowTabs, TrackTag } from "@/components/agents/AgentStats";
 import { PerformanceChart } from "@/components/charts/PerformanceChart";
 import { AddressChip } from "@/components/ui/AddressChip";
+import { computeReputation } from "@/lib/agents/reputation";
 import { cumulativePnlPoints, isTimeWindow, windowSinceMs, type TimeWindow } from "@/lib/agents/performance";
 import { getAgentDetail, listDirectoryAgents } from "@/lib/server/agent-directory";
 import { findAgentOwner } from "@/lib/server/profile";
@@ -66,6 +67,11 @@ export default async function AgentDetailPage({
   }
 
   const decided = performance.wins + performance.losses;
+  // Recomputed live rather than read from the stored column: the formula is
+  // deterministic, and only the live count of decisive settlements can tell
+  // "too few results" apart from "zero with enough results" — the stored
+  // number collapses both to 0. See docs/adr/0003-observational-reputation-v1.md.
+  const reputation = computeReputation(results);
   const memberOf = BASKET_DEFINITIONS.filter((basket) =>
     basket.members.some((member) => member.agentId === agent.id));
 
@@ -128,6 +134,18 @@ export default async function AgentDetailPage({
           </StatBlock>
           <StatBlock label="Win rate" hint={decided > 0 ? `${performance.wins}W / ${performance.losses}L` : "no decisions yet"}>
             {decided > 0 ? <Bps bps={performance.winRateBps} /> : <span className="text-pv-muted">—</span>}
+          </StatBlock>
+          <StatBlock
+            label="Reputation"
+            hint={reputation.sufficient ? `${reputation.decided} decisive · observational` : "insufficient history"}
+          >
+            {reputation.sufficient ? (
+              <span className="font-mono tabular-nums text-pv-text">
+                {(reputation.reputationBps / 100).toFixed(2)}%
+              </span>
+            ) : (
+              <span className="text-pv-muted">insufficient history</span>
+            )}
           </StatBlock>
           <StatBlock label="Open exposure" hint={`${performance.open} live`}>
             <span className="font-mono tabular-nums">{unitsToUsdc(performance.openExposureAtomic).toFixed(2)}</span>

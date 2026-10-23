@@ -10,6 +10,7 @@ import { getUsdcSacId } from "@/lib/stellar";
 import { evaluateCopyPermissionOnchain } from "@/lib/copy-permission-feedback";
 import { validateSignedWindow } from "@/lib/signed-window";
 import { consumeNonce } from "@/lib/server/nonce-store";
+import { clientIpFrom } from "@/lib/api/origin";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -68,14 +69,14 @@ function jsonResponse(data: unknown, init?: ResponseInit): Response {
 
 export async function POST(req: Request): Promise<Response> {
   const { authorizeRequest } = await import("@/lib/api/policy");
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
+  const ip = clientIpFrom(req.headers);
   const gate = await authorizeRequest("public_read", { route: "/api/copy/permissions", ip });
   if (!gate.allowed && gate.error) {
     return Response.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
   }
 
-  type JsonPermission = Omit<CopyPermission, "signedPolicyHash" | "spendPermission"> & {
-    spendPermission: Omit<CopyPermission["spendPermission"], "allowanceAtomic"> & { allowanceAtomic: string | bigint };
+  type JsonPermission = OMIT<CopyPermission, "signedPolicyHash" | "spendPermission"> & {
+    spendPermission: OMIT<CopyPermission["spendPermission"], "allowanceAtomic"> & { allowanceAtomic: string | bigint };
   };
 
   const parsedBody = await readJsonBody<{
@@ -90,7 +91,7 @@ export async function POST(req: Request): Promise<Response> {
     return jsonResponse({ error: "permission and signature required" }, { status: 400 });
   }
 
-  let permission: Omit<CopyPermission, "signedPolicyHash">;
+  let permission: OMIT<CopyPermission, "signedPolicyHash">;
   try {
     permission = {
       ...body.permission,
@@ -175,7 +176,7 @@ export async function POST(req: Request): Promise<Response> {
 
 export async function DELETE(req: Request): Promise<Response> {
   const { authorizeRequest } = await import("@/lib/api/policy");
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
+  const ip = clientIpFrom(req.headers);
   const gate = await authorizeRequest("public_read", { route: "/api/copy/permissions", ip });
   if (!gate.allowed && gate.error) {
     return Response.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
@@ -231,7 +232,7 @@ export async function DELETE(req: Request): Promise<Response> {
 
 export async function GET(req: Request): Promise<Response> {
   const { authorizeRequest } = await import("@/lib/api/policy");
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
+  const ip = clientIpFrom(req.headers);
   const gate = await authorizeRequest("public_read", { route: "/api/copy/permissions", ip });
   if (!gate.allowed && gate.error) {
     return Response.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });

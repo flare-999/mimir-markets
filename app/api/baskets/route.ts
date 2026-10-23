@@ -17,6 +17,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { isStellarAccount, verifyStellarSignedMessage } from "@/lib/stellar-message";
 
 import { apiError } from "@/lib/api/errors";
+import { clientIpFrom } from "@/lib/api/origin";
 import { authorizeRequest } from "@/lib/api/policy";
 import { BASKET_EXPIRY_MS, basketMessage, transferMessage, validateBasket, type BasketAgentWeight } from "@/lib/baskets";
 import { DEFAULT_BASKET_POLICY } from "@/lib/server/basket-directory";
@@ -35,12 +36,8 @@ function slugify(name: string): string {
   return name.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-+$/g, "").slice(0, 60);
 }
 
-function clientIp(req: NextRequest): string | undefined {
-  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
-}
-
 export async function GET(req: NextRequest) {
-  const gate = await authorizeRequest("public_read", { route: "/api/baskets", ip: clientIp(req) });
+  const gate = authorizeRequest("public_read", { route: "/api/baskets", ip: clientIpFrom(req.headers) });
   if (!gate.allowed && gate.error) {
     return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
   }
@@ -49,7 +46,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const gate = await authorizeRequest("public_read", { route: "/api/baskets", ip: clientIp(req) });
+  const gate = authorizeRequest("public_read", { route: "/api/baskets", ip: clientIpFrom(req.headers) });
   if (!gate.allowed && gate.error) {
     return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
   }

@@ -6,7 +6,7 @@
  * the server (see ./server.ts for why).
  *
  * Consent is checked here so a non-consenting user makes no network call at all,
- * and enforced again server-side so a stale tab cannot bypass it.
+ * and enforced again server-side so a stale tab"cannot bypass it.
  */
 
 import type { AnalyticsEvent, EventEnvelope, EventProperties } from "./events";

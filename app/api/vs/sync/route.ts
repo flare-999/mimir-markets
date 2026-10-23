@@ -5,10 +5,41 @@ import {
   parsePositiveIntegerParam,
 } from "@/lib/server/api-validation";
 import { apiError } from "@/lib/api/errors";
+import { authorizeRequest } from "@/lib/api/policy";
 import { triggerPostWriteRefresh } from "@/lib/server/vs-index";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
+
+const ROUTE = "/api/vs/sync";
+
+/** How long a claim stays in cooldown after a refresh. */
+const COOLDSOWN_MS = 15_000;
+
+const cooldowns = new Map<number, number>();
+
+function inCooldown(claimId: number, now = Date.now()): boolean {
+  const expiresAt = cooldowns.get(claimId);
+  if (expiresAt === undefined) return false;
+  if (expiresAt <= now) {
+    cooldowns.delete(claimId);
+    return false;
+  }
+  return true;
+}
+
+function markRefreshed(claimId: number, now = Date.now()): void {
+  cooldowns.set(claimId, now + COOLDOWN_MS);
+}
+
+function clientIp(request: Request): string | undefined {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) {
+    const first = forwarded.split(",")[0]?.trim();
+    if (first) return first;
+  }
+  return request.headers.get("x-real-ip") ?? undefined;
+}
 
 type RefreshBody = {
   claimId?: number;
@@ -25,6 +56,18 @@ export async function POST(request: Request) {
   }
 
   try {
+    const auth = authorizeRequest("public_read", {
+      route: ROUTE,
+      ip: clientIp(request),
+    });
+    if (!auth.allowed && auth.error) {
+      return NextResponse.json(auth.error.body, {
+        status: auth.error.status,
+        headers: auth.error.headers,
+      });
+    }
+
+    const payload = (await request.json()) as RefreshBody;
     const claimId = parsePositiveIntegerParam(
       payload.claimId == null ? undefined : String(payload.claimId)
     );
@@ -39,6 +82,17 @@ export async function POST(request: Request) {
       const err = apiError("invalid_request", "Invalid invite key", { field: "inviteKey" });
       return NextResponse.json(err.body, { status: err.status, headers: err.headers });
     }
+
+    // A repeated refresh of the same claim inside the cooldown is accepted
+    // but does not touch the chain: the index is already warm.
+    if (inCooldown(claimId)) {
+      return NextResponse.json(
+        { indexed: false },
+        { status: 202, headers: { "Cache-Control": "no-store" } }
+      );
+    }
+
+    markRefreshed(claimId);
 
     const claim = await triggerPostWriteRefresh({
       claimId,

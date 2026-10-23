@@ -3,7 +3,7 @@
  *
  * Four kinds of caller reach these routes and they need different things checked.
  * Before this, each route decided for itself — which is how one of them ends up
- * reading a secret from the wrong header, or forg]etting a rate limit, and nobody
+ * reading a secret from the wrong header, or forgetting a rate limit, and nobody
  * notices because there is no single place to look.
  *
  *   public_read        anyone, including an OG scrapper with no session
@@ -13,7 +13,7 @@
  *
  * The rules that make this worth having:
  *
- *  - **A tier declares its requirements; a route only names its tier.** A route
+ *  - `**A tier declares its requirements; a route only names its tier.** A route
  *    cannot accidentally be laxer than its tier, because it does not get to
  *    choose.
  *  - **Money- or authority-changing calls demand an idempotency key** at any tier
@@ -107,8 +107,8 @@ export const TIER_POLICIES: Record<AccessTier, TierPolicy> = {
     requiresSignature: false,
     requiresWorkerSecret: true,
     requiresOriginValidation: false,
-    // Route only: a worker's own bursts are a scheduling problem, not abuse, and
-    // bucketing by IP would rate-limit an entire serverless region together.
+    // Route only: a worker's own bursts of a scheduling problem, not abuse, and
+    // bucketing by internal worker would rate-limit an entire serverless region together.
     limitDimensions: ["route"],
   },
 };

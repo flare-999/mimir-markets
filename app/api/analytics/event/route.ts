@@ -1,4 +1,4 @@
-/**
+/*
  * POST /api/analytics/event — the only way a browser event reaches PostHog.
  *
  * Exists so the actor salt never leaves the server (see lib/analytics/server.ts)

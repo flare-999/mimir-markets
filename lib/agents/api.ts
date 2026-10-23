@@ -30,7 +30,21 @@ export const AGENT_FUNDED_FEATURE = "byoa_funded_actions" as const;
 /** The rollout flag that gates registration. */
 export const AGENT_REGISTRY_FEATURE = "byoa_registry" as const;
 
-export interface SignedAgentRequest<T = unknown> {
+/**
+ * Actions that require an owner-signed envelope and cannot be called with an API
+ * key. The server rejects these from bearer credentials; the SDK refuses to send
+ * them locally so the failure is clear and never reaches the wire.
+ */
+export const AGENT_OWNER_SIGNED_ACTIONS: readonly AgentApiAction[] = [
+  "issueKey", "revokeKey", "rotateKey", "grantSpend",
+];
+
+/** True when an action must be owner-signed. */
+export function isOwnerSignedAction(action: AgentApiAction): boolean {
+  return (AGENT_OWNER_SIGNED_ACTIONS as readonly string[]).includes(action);
+}
+
+export interface SignedAgentRequesT<T = unknown> {
   version: typeof AGENT_API_VERSION;
   agentId: string;
   action: AgentApiAction;
@@ -105,7 +119,7 @@ export function agentRequestMessage(request: Omit<SignedAgentRequest, "signature
  * `register` needs two proofs: the owner grants the record, and the operator
  * proves it controls the hot key it is about to be handed. They are separate
  * messages because they are separate claims — one signature must never satisfy
- * both — and the leading `Mimir …` line is the domain separation that keeps a
+ * both — and the leading `Mimir …' line is the domain separation that keeps a
  * proof harvested from another surface from verifying here.
  *
  * Exported so the published wire contract carries the exact bytes an operator has

@@ -159,6 +159,13 @@ impl MimirMarket {
 
     /// Solidity used `msg.sender`; Soroban has no equivalent for a top-level
     /// call, so the beneficiary is an explicit argument that must authorize.
+    ///
+    /// Withdrawals are intentionally NOT gated by the pause flag: pause
+    /// controls may halt new claims, challenges, and resolutions, but must
+    /// never block a funded user from pulling their own balance. This keeps
+    /// contract-first accounting intact — a paused market still owes its
+    /// users their escrowed funds, and the only safe way to honor that is to
+    /// let them withdraw.
     pub fn withdraw(env: Env, who: Address) -> Result<i128, Error> {
         resolve::withdraw(&env, who)
     }
@@ -185,6 +192,13 @@ impl MimirMarket {
     /// Convenience view returning only the decoded verdict side.
     pub fn get_verdict_side(env: Env, claim_id: u64) -> Result<WinnerSide, Error> {
         resolve::get_verdict(&env, claim_id)?.decode()
+    }
+
+    /// Whether the contract is currently paused. Pause halts new claims,
+    /// challenges, and resolutions, but never blocks `withdraw` or
+    /// `claim_fees` — see those entry points for the invariant.
+    pub fn is_paused(env: Env) -> bool {
+        storage::is_paused(&env)
     }
 
     /// Batch-read up to [`MAX_BATCH_SIZE`] claims in one simulated call.

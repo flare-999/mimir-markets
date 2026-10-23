@@ -19,6 +19,7 @@ import { challengeClaim } from "../../../lib/contract";
 import { getCouncilWallet, readAgentBalances } from "../../../lib/agent-wallets";
 import { kellyFraction } from "../../../lib/kelly";
 import { createThrottle } from "../../../lib/agent-bootstrap";
+import { parseCouncilConfig } from "./config";
 import {
   type PersonaSpec,
   personaSecretEnv,
@@ -45,8 +46,13 @@ const DEFAULT_STAKE_USDC     = 2;
  * single process and add a small delay between them so a burst across
  * 8+ personas doesn't trip 429s. Overridable via COUNCIL_LLM_THROTTLE_MS.
  */
-const LLM_THROTTLE_MS = Number(process.env.COUNCIL_LLM_THROTTLE_MS ?? 8000);
-const throttleLlm = createThrottle(LLM_THROTTLE_MS);
+const parsedConfig = parseCouncilConfig(process.env);
+if (!parsedConfig.ok) {
+  throw new Error(
+    `Invalid council configuration:\n${parsedConfig.errors.map((e) => `  - ${e}`).join("\n")}`,
+  );
+}
+const throttleLlm = createThrottle(parsedConfig.config.llmThrottleMs);
 
 // Conservative Kelly cap: personas play across many markets (oracle uses 0.25).
 // Exported so tests can assert the cap without duplicating the constant.

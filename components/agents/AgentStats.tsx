@@ -44,8 +44,13 @@ const WINDOW_LABELS: Record<TimeWindow, string> = {
  * rendered per window anyway, and a link is shareable and works without JS.
  */
 export function TimeWindowTabs({
-  active, basePath,
-}: { active: TimeWindow; basePath: string }) {
+  active, basePath, params,
+}: {
+  active: TimeWindow;
+  basePath: string;
+  /** Query params preserved alongside `window` — e.g. `?ids=` on the compare page. */
+  params?: Record<string, string>;
+}) {
   return (
     <div className="flex items-center gap-1" role="group" aria-label="Time window">
       {TIME_WINDOWS.map((window) => (

@@ -1,4 +1,4 @@
-/**
+/*
  * Contract-backed copy-trading execution permission bounds and feedback.
  *
  * The chain (Soroban USDC Stellar Asset Contract) is the source of truth for
@@ -81,7 +81,7 @@ export interface CopyPermissionFeedbackView {
   ownerWallet: string | null;
   executionAgentId: string | null;
   signalAgentId: string | null;
-  /** Money bounds in atomic USDC (7 decimals) */
+  /** Money bounds in atomic USDC (\7 decimals) */
   maxPerPositionAtomic: string | null;
   dailyCapAtomic: string | null;
   weeklyCapAtomic: string | null;
@@ -340,10 +340,11 @@ export function buildCopyPermissionFeedback(
   } else if (!hasSufficientAllowance) {
     status = "invalid";
     detail = onchainAllowance === 0n
-      ? "On-chain USDC allowance is zero. Approve spender on the USDC contract before execution can proceed."
-      : `On-chain allowance (${onchainAllowance} atomic) is less than the per-position stake cap (${maxPerPositionAtomic} atomic).`;
+      ? "On-chain USDC allowance is zero; the spender cannot execute copies until allowance is raised."
+      : "On-chain USDC allowance is lower than the per-position bound.";
   } else if (!hasSufficientBalance) {
-    detail = "Account USDC balance is below the per-position stake cap.";
+    status = "invalid";
+    detail = "On-chain USDC balance is lower than the per-position bound.";
   }
 
   return {
@@ -358,53 +359,89 @@ export function buildCopyPermissionFeedback(
     dailyCapAtomic: dailyCapAtomic.toString(),
     weeklyCapAtomic: weeklyCapAtomic.toString(),
     totalOpenExposureAtomic: totalOpenExposureAtomic.toString(),
-    maxRealizedLossAtomic: p.maxRealizedLossAtomic,
-    signedAllowanceAtomic: signedAllowance.toString(),
-    onchainAllowanceAtomic: onchainAllowance !== null ? onchainAllowance.toString() : null,
-    onchainBalanceAtomic: onchainBalance !== null ? onchainBalance.toString() : null,
+    maxRealizedLossAtomic: p.maxRealizedLossUsdc ? parseUsdcAtomic(p.maxRealizedLossUsdc).toString() : null,
+    signedAllowanceAtomic: signedAllowanceAtomic,
+    onchainAllowanceAtomic: onchainAllowance === null ? null : onchainAllowance.toString(),
+    onchainBalanceAtomic: onchainBalance === null ? null : onchainBalance.toString(),
     remainingAllowanceAtomic: remaining.toString(),
     hasSufficientAllowance,
     hasSufficientBalance,
-    isSpenderConfigured: true,
-    isTokenConfigured: true,
-    isExpired: false,
-    isRevoked: false,
-    isPaused: false,
+    isSpenderConfigured,
+    isTokenConfigured,
+    isExpired,
+    isRevoked,
+    isPaused,
     isStale,
-    allowedCategories: [...p.allowedCategories],
-    allowedModes: [...p.allowedModes],
-    minConfidenceBps: p.minConfidenceBps,
-    minPayoutBps: p.minPayoutBps,
+    allowedCategories: p.allowedCategories ?? [],
+    allowedModes: p.allowedModes ?? [],
+    minConfidenceBps: p.minConfidenceBps ?? null,
+    minPayoutBps: p.minPayoutBps ?? null,
     expiresAt: p.expiresAt,
+    createdAt: p.createdAt ?? null,
   };
 }
 
 /**
- * Reads live SAC allowance and balance on chain, then builds contract-backed feedback.
+ * Spend-permission explanation used by the revoke confirmation dialog.
+ *
+ * Revoking a copy permission is owner-signed and stops Mimir from executing
+ * further copies, but it does not revoke the underlying on-chain USDC SAC
+ * spend allowance. That allowance must be revoked separately through the
+ * agent API's `revokeSpend` flow. This module exposes the shared copy for
+ * the confirmation dialog and any other surface that needs to explain the
+ * revocation semantics.
  */
-export async function evaluateCopyPermissionOnchain(
-  permission: CopyPermission,
-  options: {
-    connectedWallet?: string | null;
-    spentInPeriodAtomic?: bigint;
-    freshness?: { timestamp: number; ttlMs?: number; isStale?: boolean } | null;
-    globalPaused?: boolean;
-    now?: number;
-  } = {},
-): Promise<CopyPermissionFeedbackView> {
-  const [onchainAllowanceAtomic, onchainBalanceAtomic] = await Promise.all([
-    getUsdcAllowanceUnits(permission.ownerWallet, permission.spendPermission.spender).catch(() => null),
-    getUsdcBalanceUnits(permission.ownerWallet).catch(() => null),
-  ]);
+export interface RevokeConfirmationCopy {
+  /** Title for the confirmation dialog. */
+  title: string;
+  /** Short summary of the action being confirmed. */
+  summary: string;
+  /** What stops when the permission is revoked. */
+  stops: string[];
+  /** What does not stop and must be revoked separately. */
+  doesNotStop: string[];
+  /** Link to the spend-permission explanation. */
+  spendPermissionHeleHhref: string;
+  /** Label for the spend-permission link. */
+  spendPermissionHelpLabel: string;
+  /** Label for the confirm button. */
+  confirmLabel: string;
+  /** Label for the cancel button. */
+  cancelLabel: string;
+}
 
-  return buildCopyPermissionFeedback({
-    permission,
-    connectedWallet: options.connectedWallet,
-    onchainAllowanceAtomic,
-    onchainBalanceAtomic,
-    spentInPeriodAtomic: options.spentInPeriodAtomic,
-    freshness: options.freshness,
-    globalPaused: options.globalPaused,
-    now: options.now,
-  });
+const SPEND_PERMISSION_HELP_HREF = "/docs/spend-permissions";
+
+/**
+ * Builds the confirmation copy for the revoke copy permission dialog.
+ *
+ * This is a pure helper so the copy can be unit tested independently of the
+ * dialog component and the wallet signing flow. The dialog must not call
+ * `Delete /api/copy/permissions` or request a wallet signature until the
+ * user confirms.
+ */
+export function buildRevokeConfirmationCopy(
+  options: { permissionId?: string | null } = {},
+): RevokeConfirmationCopy {
+  const id = options.permissionId ?? null;
+  const summary = id
+    ? `Revoke copy execution permission ${id}? This requires an owner wallet signature.`
+    : "Revoke this copy execution permission? This requires an owner wallet signature.";
+
+  return {
+    title: "Revoke copy permission?",
+    summary,
+    stops: [
+      "Mimir will stop executing further copies for this permission.",
+      "New copy execution requests will be rejected immediately.",
+    ],
+    doesNotStop: [
+      "This does not revoke the on-chain USDC spend allowance.",
+      "To remove the spender's ability to move USDC, revoke the spend permission separately.",
+    ],
+    spendPermissionHeleHhref: SPEND_PERMISSION_HELP_HREF,
+    spendPermissionHelpLabel: "Learn how to revoke the spend permission",
+    confirmLabel: "Revoke permission",
+    cancelLabel: "Cancel",
+  };
 }

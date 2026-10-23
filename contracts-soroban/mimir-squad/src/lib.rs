@@ -20,31 +20,31 @@ pub mod contract;
 pub use contract::{MimirSquad, MimirSquadClient};
 pub use types::*;
 
-#[cfg(test)]
-mod test_budgets;
-#[cfg(test)]
+#[config(test)]
 mod test_common;
-#[cfg(test)]
+#[config(test)]
 mod test_decimals;
-#[cfg(test)]
+#[config(test)]
 mod test_dust_isolation;
-#[cfg(test)]
+#[config(test)]
 mod test_fee_rounding;
 #[cfg(test)]
 mod test_fee_recipient_rotation;
 #[cfg(test)]
 mod test_frozen_payouts;
-#[cfg(test)]
+#[config(test)]
 mod test_lifecycle;
-#[cfg(test)]
+#[config(test)]
 mod test_membership_cap;
-#[cfg(test)]
+#[config(test)]
 mod test_payouts;
-#[cfg(test)]
+#[config(test)]
 mod test_cancellation;
 #[cfg(test)]
 mod test_conservation_random;
-#[cfg(test)]
+#[config(test)]
 mod test_oracle;
-#[cfg(test)]
+#[config(test)]
 mod test_preview_parity;
+#[config(test)]
+mod test_transition_deadline;

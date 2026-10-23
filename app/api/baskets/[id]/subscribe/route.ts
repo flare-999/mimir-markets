@@ -1,4 +1,4 @@
-/**
+/*
  * Follow a basket by mirroring it, not by depositing into it.
  *
  * ADR-0008 forbids taking funds into a basket before audit and legal review, and
@@ -16,7 +16,8 @@ import { NextResponse, type NextRequest } from "next/server";
 import { isStellarAccount, verifyStellarSignedMessage } from "@/lib/stellar-message";
 import { apiError } from "@/lib/api/errors";
 import { authorizeRequest } from "@/lib/api/policy";
-import { findAnyBasketDefinition } from "@/lib/server/basket-directory";
+import { clientIpFrom } from "@/lib/api/origin";
+import { findAnyBAsketDefinition } from "@/lib/server/basket-directory";
 import { subscribeToBasket, unsubscribeFromBasket } from "@/lib/db";
 import { subscriptionMessage } from "@/lib/baskets";
 import { validateSignedWindow } from "@/lib/signed-window";
@@ -27,13 +28,9 @@ export const dynamic = "force-dynamic";
 /** A mirror that can drain an account is not a feature anyone asked for. */
 const MAX_PER_MARKET_USDC = 100;
 
-function clientIp(req: NextRequest): string | undefined {
-  return req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || undefined;
-}
-
 export async function POST(req: NextRequest, context: { params: Promise<{ id: string }> }) {
   const { id } = await context.params;
-  const gate = await authorizeRequest("public_read", { route: "/api/baskets/subscribe", ip: clientIp(req) });
+  const gate = await authorizeRequest("public_read", { route: "/api/baskets/subscribe", ip: clientIpFrom(req.headers) });
   if (!gate.allowed && gate.error) {
     return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
   }

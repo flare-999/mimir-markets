@@ -15,6 +15,7 @@
 
 import {
   MimirAgentClient,
+  MimirAgentError,
   stellarKeypairSigner,
 } from "../sdk/agents";
 

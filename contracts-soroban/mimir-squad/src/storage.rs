@@ -16,6 +16,10 @@ pub enum DataKey {
     MarketCount,
     AccruedFees,
     Market(u64),
+    /// Global pause flag. When set, state-mutating entry points that are not
+    /// withdrawals are rejected. Withdrawals (claim, claim_parked_payout)
+    /// MUST remain available while paused.
+    Paused,
     /// (market, side, participant) -> deposited units. Shares equal units.
     Deposit(u64, u32, Address),
     /// (market, side, participant) -> already claimed.
@@ -69,6 +73,22 @@ pub fn set_config(env: &Env, usdc: &Address, oracle: &Address, fee_recipient: &A
 pub fn set_oracle(env: &Env, oracle: &Address) {
     env.storage().instance().set(&DataKey::Oracle, oracle);
 }
+
+// ── Pause ────────────────────────────────────────────────────────────────────
+
+/// Returns true when the contract is paused. Pause only gates non-withdrawal
+/// state mutations; withdrawal paths must not consult this flag.
+pub fn is_paused(env: &Env) -> bool {
+    env.storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+}
+
+pub fn set_paused(env: &Env, paused: bool) {
+    env.storage().instance().set(&DataKey::Paused, &paused);
+}
+
 /// How long a queued oracle rotation must wait before it can be executed.
 pub const ORACLE_TIMELOCK_SECONDS: u64 = 86_400;
 

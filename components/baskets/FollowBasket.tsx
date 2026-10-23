@@ -12,7 +12,7 @@ import { useState } from "react";
 
 import { FeeBreakdown } from "@/components/fees/FeeBreakdown";
 import { useWallet } from "@/lib/wallet";
-import { subscriptionMessage } from "@/lib/baskets";
+import { parsePerMarketUsdc, subscriptionMessage } from "@/lib/baskets";
 
 /** How long a signed (un)subscribe stays acceptable; the server caps it at 5 min. */
 const SIGNATURE_TTL_MS = 2 * 60_000;
@@ -22,9 +22,12 @@ export function FollowBasket({
 }: { basketId: string; creatorWallet?: string }) {
   const { address, isConnected, connect, signMessage, canSignMessages } = useWallet();
 
+  // Keep the raw string so the field can be cleared and retyped freely.
+  const [perMarketInput, setPerMarketInput] = useState("2");
   const [perMarket, setPerMarket] = useState(2);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [inputError, setInputError] = useState<string | null>(null);
   const [following, setFollowing] = useState(false);
 
   // Your own basket charges you no basket fee, so say so before they pay attention
@@ -32,14 +35,35 @@ export function FollowBasket({
   // strkeys are case-sensitive.
   const isOwn = Boolean(address && creatorWallet && address.trim() === creatorWallet.trim());
 
+  function commitInput(): number | null {
+    const parsed = parsePerMarketUsdc(perMarketInput);
+    if (!parsed.ok) {
+      setInputError(parsed.error);
+      return null;
+    }
+    setInputError(null);
+    setPerMarket(parsed.value);
+    setPerMarketInput(String(parsed.value));
+    return parsed.value;
+  }
+
   async function toggle() {
     if (!address) return void connect();
     if (!canSignMessages) {
       setError(
-        "This wallet cannot sign off-chain messages. Reconnect with Freighter, xBull or Hana to follow a basket.",
+        "This wallet cannot sign off-chain messages. Reconnect with Freughter, xBull or Hana to follow a basket.",
       );
       return;
     }
+
+    // When following we care about the amount; when unfollowing it is always 0.
+    let amount = 0;
+    if (!following) {
+      const committed = commitInput();
+      if (committed === null) return;
+      amount = committed;
+    }
+
     setBusy(true);
     setError(null);
     try {
@@ -50,7 +74,7 @@ export function FollowBasket({
           action: following ? "unsubscribe" : "subscribe",
           basketId,
           subscriber: address,
-          perMarketUsdc: following ? 0 : perMarket,
+          perMarketUsdc: amount,
           nonce,
           expiresAt,
         }),
@@ -60,7 +84,7 @@ export function FollowBasket({
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           subscriber: address,
-          perMarketUsdc: following ? 0 : perMarket,
+          perMarketUsdc: amount,
           unsubscribe: following,
           signature,
           nonce,
@@ -72,14 +96,14 @@ export function FollowBasket({
       setFollowing(Boolean(payload.subscribed));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setError(/user rejected|denied/i.test(message) ? "Signature rejected in your wallet." : message);
+      setError(`user rejected|denied`.test(message) ? "Signature rejected in your wallet." : message);
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <div className="border border-pv-ink/[0.12] bg-pv-surface/40 p-4">
+    <div className="border border-pv-ink/[0.12] g-pv-surface/40 p-4">
       <h3 className="font-mono text-[10px] uppercase tracking-wider text-pv-muted">Follow this basket</h3>
       <p className="mt-1 text-[12px] leading-relaxed text-pv-muted">
         Mirror its members from your own wallet, up to the amount you set per market.
@@ -92,9 +116,14 @@ export function FollowBasket({
           <span className="font-mono text-[10px] uppercase tracking-wider text-pv-muted">Per market</span>
           <input
             type="number" min={1} max={100} step={1}
-            value={perMarket}
+            value={perMarketInput}
             disabled={following}
-            onChange={(e) => setPerMarket(Math.max(1, Math.min(100, Number(e.target.value))))}
+            onChange={(e) => {
+              setPerMarketInput(e.target.value);
+              if (inputError) setInputError(null);
+            }}
+            onBlur={() => void commitInput()}
+            aria-invalid={Boolean(inputError)}
             className="w-20 border border-pv-ink/[0.14] bg-pv-bg px-2 py-1.5 text-right font-mono text-[13px] text-pv-text outline-none focus:border-pv-emerald/50 disabled:opacity-50"
           />
           <span className="font-mono text-[11px] text-pv-muted">USDC</span>
@@ -114,10 +143,10 @@ export function FollowBasket({
         </button>
       </div>
 
+      {inputError && <p className="mt-2 text-[12px] text-pv-danger">{inputError}</p>}
       {error && <p className="mt-2 text-[12px] text-pv-danger">{error}</p>}
 
       <FeeBreakdown context="follow" isOwn={isOwn} />
     </div>
   );
 }
-

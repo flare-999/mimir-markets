@@ -28,6 +28,7 @@ import { reportingPoll, runWorkerLoop } from "../../lib/ops/heartbeat";
 import { resolvePollJitterMs } from "../../lib/ops/poll-jitter";
 import { reconcileSettlements } from "../../lib/server/settlement-index";
 import { reconcileVsIndex } from "../../lib/server/vs-index";
+import { reconcileAgentReputations } from "../../lib/agents/reputation";
 import {
   BackoffError,
   DependencyFailureError,

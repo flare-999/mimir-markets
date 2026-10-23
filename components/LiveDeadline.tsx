@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { formatDeadline, getTimeRemaining } from "@/lib/constants";
+import { formatDeadline } from "@/lib/constants";
+import { useCountdown } from "@/lib/hooks";
 import { useLocale, useTranslations } from "next-intl";
 import { resolveCountdownLocale } from "@i18n/locale";
 
@@ -52,7 +53,7 @@ export default function LiveDeadline({
   const locale = useLocale();
   const countdownLocale = resolveCountdownLocale(locale);
   const t = useTranslations("liveDeadline");
-  const [state, setState] = useState(() => getTimeRemaining(deadline, countdownLocale));
+  const state = useCountdown(deadline);
   // Resolve timezone only after mount so SSR markup stays stable and the
   // absolute label always reflects the viewer's zone (not the server's).
   const [mounted, setMounted] = useState(false);
@@ -60,14 +61,6 @@ export default function LiveDeadline({
   useEffect(() => {
     setMounted(true);
   }, []);
-
-  useEffect(() => {
-    const id = setInterval(
-      () => setState(getTimeRemaining(deadline, countdownLocale)),
-      1000
-    );
-    return () => clearInterval(id);
-  }, [deadline, countdownLocale]);
 
   const absoluteLocal = useMemo(() => {
     if (!mounted || !Number.isFinite(new Date(deadline * 1000).getTime())) return "";

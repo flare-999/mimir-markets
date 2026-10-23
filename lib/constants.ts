@@ -31,6 +31,26 @@ export const DEADLINE_PRESET_SECONDS: Record<DeadlinePresetId, number> = {
 
 export const PV_EMERALD_HEX = "#4edea3";
 
+/**
+ * Timing constants for the VS detail page resolve animation.
+ *
+ * Extracted from `app/[locale]/vs/[id]/page.tsx` so the section components
+ * under `components/vs/detail/*` can share the same timings without importing
+ * the route file. Values are unchanged from the original page implementation.
+ */
+export const RESOLVE_PHASE_MS = 1200;
+export const VERDICT_OVERLAY_MS = 2400;
+
+/**
+ * Shared toast options for transaction lifecycle notifications on the VS
+ * detail page. Kept here so extracted section components and the page agree on
+ * duration/position without duplicating literals.
+ */
+export const txToastOptions: { duration: number; position: "top-center" } = {
+  duration: 4000,
+  position: "top-center" as const,
+};
+
 export const CATEGORIES = [
   { id: "sports", label: "Sports", color: "#22D3EE" },
   { id: "weather", label: "Weather", color: "#E879F9" },

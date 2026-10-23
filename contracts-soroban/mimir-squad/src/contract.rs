@@ -80,6 +80,17 @@ impl MimirSquad {
         pool::claim_fees(&env)
     }
 
+    /// Pause or unpause the contract. Pausing must never block withdrawals,
+    /// claims, or parked-payout retries; only new deposits and market creation
+    /// are gated by the pause flag.
+    pub fn set_paused(env: Env, paused: bool) -> Result<(), Error> {
+        pool::set_paused(&env, paused)
+    }
+
+    pub fn is_paused(env: Env) -> bool {
+        storage::is_paused(&env)
+    }
+
     /// Retry a payout that [`Self::claim`] parked because the transfer trapped
     /// (frozen or deauthorized trustline). Returns the amount moved, or `0`
     /// when nothing is parked.
@@ -92,10 +103,24 @@ impl MimirSquad {
         pool::claim_parked_payout(&env, participant, market_id, side)
     }
 
+    pub fn withdraw_before_deadline(
+        env: Env,
+        participant: Address,
+        market_id: u64,
+        side: u32,
+        amount: i128,
+    ) -> Result<(), Error> {
+        pool::withdraw_before_deadline(&env, participant, market_id, side, amount)
+    }
+
     // ── Views ────────────────────────────────────────────────────────────────
 
     pub fn get_market(env: Env, market_id: u64) -> Result<Market, Error> {
         storage::get_market(&env, market_id)
+    }
+
+    pub fn get_paused(env: Env) -> bool {
+        storage::is_paused(&env)
     }
 
     pub fn get_markets_batch(
@@ -109,11 +134,19 @@ impl MimirSquad {
             return Err(Error::NotInitialized);
         }
 
+        if !storage::is_initialized(&env) {
+            return Err(Error::NotInitialized);
+        }
+
         let mut results: Vec<Option<Market>> = Vec::new(&env);
         for id in ids.iter() {
             results.push_back(storage::get_market_opt(&env, id));
         }
         Ok(results)
+    }
+
+    pub fn get_pause_status(env: Env) -> bool {
+        storage::is_paused(&env)
     }
 
     pub fn get_deposit(env: Env, market_id: u64, side: u32, who: Address) -> i128 {
@@ -200,5 +233,9 @@ impl MimirSquad {
     pub fn get_escrow_balance(env: Env) -> Result<i128, Error> {
         let usdc = storage::usdc(&env)?;
         Ok(escrow::balance(&env, &usdc))
+    }
+
+    pub fn get_paused_flag(env: Env) -> bool {
+        storage::is_paused(&env)
     }
 }

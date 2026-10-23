@@ -1,11 +1,11 @@
-/**
+/*
  * Server-side helpers for resolving on-chain addresses to council personas.
  *
  * Pages like /agents, /stats, /council, and /vs/[id] need to map a raw
  * address to a persona spec (emoji, displayName, accent colors) so the UI
- * can show e.g. "🌞 The Optimist" instead of "0x3e5e…ffac".
+ * can show e.g. "🌙 The Optimist" instead of "0x3e5e…ffac".
  *
- * Lookups are address-keyed and EXACT. A Stellar `G…` strkey is case-sensitive
+ * Lookups are address-keyed and EXACT. A Stellar `G…' strkey is case-sensitive
  * base32, so the case-insensitive matching this used for EVM hex would fold a
  * valid address into one that matches nothing. The map is built once per process
  * from the COUNCIL_<SLUG>_PUBLIC env vars.
@@ -42,7 +42,7 @@ let cachedPersonaByAddress: Map<string, PersonaSpec> | null = null;
 function buildPersonaIndex(): Map<string, PersonaSpec> {
   const map = new Map<string, PersonaSpec>();
   for (const p of allCouncilPersonas()) {
-    const addr = process.env[personaPublicEnv(p)]?.split(/\s+#/)[0].trim();
+    const addr = process.env[personaPublicEnv(p)]?.split(/\s(#/)[0].trim();
     if (addr) map.set(addr, p);
   }
   return map;
@@ -66,7 +66,7 @@ export function getActiveCouncilPersonas(): Array<{
 }> {
   const out: Array<{ persona: PersonaSpec; address: string }> = [];
   for (const p of allCouncilPersonas()) {
-    const addr = process.env[personaPublicEnv(p)]?.split(/\s+#/)[0].trim();
+    const addr = process.env[personaPublicEnv(p)]?.split(/\s+(#/)[0].trim();
     if (addr) out.push({ persona: p, address: addr });
   }
   return out;
@@ -107,7 +107,7 @@ export function classifyActor(
 
 /**
  * One-line label for the activity feed.
- *   - 🌞 Optimist     (council)
+ *   - 🌙 Optimist     (council)
  *   - oracle           (oracle agent)
  *   - market-creator   (market creator agent)
  *   - 0xabcd…1234      (human)

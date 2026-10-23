@@ -1,0 +1,27 @@
+{
+  "default_branch": "main",
+  "branches": [
+    "feat/issue-330-feat-api-rate-limit-the-public-vs-index-refresh",
+    "feat/issue-333-feat-api-gate-the-revenue-summary-route-with",
+    "feat/issue-434-feat-ui-add-keyboard-shortcuts-help-to-the",
+    "fix/issue-325-fix-contracts-remove-the-duplicated-types",
+    "main",
+    "origin"
+  ],
+  "parent": {
+    "feat/issue-330-feat-api-rate-limit-the-public-vs-index-refresh": "main",
+    "feat/issue-333-feat-api-gate-the-revenue-summary-route-with": "main",
+    "feat/issue-434-feat-ui-add-keyboard-shortcuts-help-to-the": "main",
+    "fix/issue-325-fix-contracts-remove-the-duplicated-types": "main",
+    "main": null,
+    "origin": "main"
+  },
+  "order": [
+    "main",
+    "feat/issue-330-feat-api-rate-limit-the-public-vs-index-refresh",
+    "feat/issue-333-feat-api-gate-the-revenue-summary-route-with",
+    "feat/issue-434-feat-ui-add-keyboard-shortcuts-help-to-the",
+    "fix/issue-325-fix-contracts-remove-the-duplicated-types",
+    "origin"
+  ]
+}

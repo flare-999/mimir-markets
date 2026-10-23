@@ -174,6 +174,9 @@ export const SCHEMA_STATEMENTS: SqlStatement[] = [
   { sql: "CREATE INDEX IF NOT EXISTS idx_claims_parent ON claims(parent_id)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_claims_visibility ON claims(visibility)" },
   { sql: "CREATE INDEX IF NOT EXISTS idx_claims_active ON claims(state, is_final)" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_claims_visibility_state ON claims(visibility, state)" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_claims_visibility_category ON claims(visibility, category)" },
+  { sql: "CREATE INDEX IF NOT EXISTS idx_claims_visibility_creator ON claims(visibility, creator)" },
   { sql: `CREATE TABLE IF NOT EXISTS challengers (
     claim_id BIGINT NOT NULL,
     address TEXT NOT NULL,
@@ -1754,6 +1757,29 @@ export async function upsertAgentRecord(agent: AgentRecord): Promise<void> {
       args: [agent.agentId, capability, agent.updatedAt],
     });
   }
+}
+
+/**
+ * Store an observational reputation recomputation.
+ *
+ * Deliberately its own statement rather than a reuse of `upsertAgentRecord`:
+ * the sync worker refreshes reputation for every agent on every pass, and a
+ * full-row upsert would rewrite limits, status and capabilities from a stale
+ * in-memory copy just to move one display column. Reputation is observational —
+ * this UPDATE is the only writer, and it touches nothing an authorization path
+ * reads.
+ */
+export async function updateAgentReputationBps(
+  agentId: string,
+  reputationBps: number,
+  at: number,
+): Promise<void> {
+  const pool = await getDb();
+  await execute(pool, {
+    sql: `UPDATE agent_registry SET reputation_bps = ?, updated_at = ?
+      WHERE agent_id = ?`,
+    args: [reputationBps, at, agentId],
+  });
 }
 
 export async function getAgentRecord(agentId: string): Promise<AgentRecord | null> {

@@ -64,8 +64,8 @@ export const TRANSFER_EXPIRY_MS = 5 * 60_000; // 5 minutes
  * Together these two fields mean:
  *   - A signature captured in transit cannot be replayed after TRANSFER_EXPIRY_MS.
  *   - Even within the window, submitting the same signed payload twice is rejected
- *     by the UNIQUE(agent_id, nonce) constraint on the nonce store.
- *   - If ownership cycles A→B→A, the old A→B signature is still unusable because
+ *     by the UNIQUE(nonce) constraint on basket_ownership_transfers.
+ *   - If ownership cycles A–B→…, the old A–B→… signature is still unusable because
  *     its nonce was consumed on first use.
  */
 export function transferMessage(args: {
@@ -112,6 +112,47 @@ export function subscriptionMessage(args: {
     `expiresAt: ${new Date(args.expiresAt).toISOString()}`,
     "Mimir never holds your funds. Every stake is signed by you.",
   ].join("\n");
+}
+
+/** Minimum per-market amount in USDC that a follower can set. */
+export const PER_MARKET_MIN_USDC = 1;
+
+/** Maximum per-market amount in USDC that a follower can set. */
+export const PER_MARKET_MAX_USDC = 100;
+
+export type PerMarketParseResult =
+  | { ok: true; value: number }
+  | { ok: false; error: string };
+
+/**
+ * Parse the raw string from the per-market input into a valid USDC amount.
+ *
+ * The input keeps the raw string in state while editing so the field can be
+ * cleared and retyped freely; this helper is the single source of truth for
+ * whether the current value is acceptable and what error to show if not.
+ */
+export function parsePerMarketUsdc(raw: string): PerMarketParseResult {
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    return {
+      ok: false,
+      error: `Enter an amount between ${PER_MARKET_MIN_USDC} and ${PER_MARKET_MAX_USDC} USDC.`,
+    };
+  }
+  const n = Number(trimmed);
+  if (!Number.isFinite(n)) {
+    return { ok: false, error: "Enter a valid number." };
+  }
+  if (!Number.isInteger(n)) {
+    return { ok: false, error: "Use a whole number of USDC." };
+  }
+  if (n < PER_MARKET_MIN_USDC || n > PER_MARKET_MAX_USDC) {
+    return {
+      ok: false,
+      error: `Enter an amount between ${PER_MARKET_MIN_USDC} and ${PER_MARKET_MAX_USDC} USDC.`,
+    };
+  }
+  return { ok: true, value: n };
 }
 
 /**

@@ -76,13 +76,27 @@ import { runPersonaForClaim } from "./shared/persona-runner";
 import { buyPeerReasoning } from "./shared/peer-reasoning";
 import { toClaimOnChain } from "./shared/types";
 import { maxAgeForCategory, validateEvidenceIntegrity } from "./shared/evidence-freshness";
+import { parseCouncilConfig } from "./shared/config";
 import type {
   ClaimOnChain,
   PersonaRunnerContext,
   EvidenceCacheEntry,
 } from "./shared/types";
 
-const POLL_INTERVAL_MS = Number(process.env.COUNCIL_POLL_INTERVAL_MS ?? 180_000);
+// ── Config ────────────────────────────────────────────────────────────────────
+// Parse and validate all numeric settings up front so a malformed value stops
+// the worker at boot instead of silently disabling loops/caps with NaN.
+const PARSED_CONFIG = parseCouncilConfig(process.env);
+if (!PARSED_CONFIG.ok) {
+  console.error("[council] Invalid configuration:");
+  for (const error of PARSED_CONFIG.errors) {
+    console.error(`  - ${error}`);
+  }
+  process.exit(1);
+}
+const CONFIG = PARSED_CONFIG.config;
+
+const POLL_INTERVAL_MS = CONFIG.pollIntervalMs;
 // ± around each cycle; unset = 10% of the interval, 0 = fixed scheduling.
 const POLL_JITTER_MS = resolvePollJitterMs(POLL_INTERVAL_MS, process.env.COUNCIL_POLL_JITTER_MS);
 /**
@@ -90,13 +104,13 @@ const POLL_JITTER_MS = resolvePollJitterMs(POLL_INTERVAL_MS, process.env.COUNCIL
  * Claims are sorted by deadline-proximity so the council focuses on
  * the markets closest to settling.
  */
-const MAX_CLAIMS_PER_CYCLE = Number(process.env.COUNCIL_MAX_CLAIMS ?? 1);
-const DECISION_DELAY_MS    = Number(process.env.COUNCIL_DECISION_DELAY_MS ?? 30000);
+const MAX_CLAIMS_PER_CYCLE = CONFIG.maxClaimsPerCycle;
+const DECISION_DELAY_MS    = CONFIG.decisionDelayMs;
 const PEER_READS_ENABLED   = process.env.COUNCIL_PEER_READS === "1";
 const PEER_READS_BASE_URL  = process.env.MIMIR_BASE_URL ?? "http://localhost:3000";
-const PEER_READS_PER_PERSONA = Number(process.env.COUNCIL_PEER_READS_PER_PERSONA ?? 2);
-const PEER_READ_DELAY_MS   = Number(process.env.COUNCIL_PEER_READ_DELAY_MS ?? 15000);
-const PEER_READ_CAP_USDC   = Number(process.env.COUNCIL_PEER_READ_CAP_USDC ?? "0.003");
+const PEER_READS_PER_PERSONA = CONFIG.peerReadsPerPersona;
+const PEER_READ_DELAY_MS   = CONFIG.peerReadDelayMs;
+const PEER_READ_CAP_USDC   = CONFIG.peerReadCapUsdc;
 const CONTRACT_ID          = requireMarketContractId();
 
 /**

@@ -10,6 +10,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 
 import { apiError } from "@/lib/api/errors";
+import { clientIpFrom } from "@/lib/api/origin";
 import { authorizeRequest } from "@/lib/api/policy";
 import { listBasketSubscriptions } from "@/lib/db";
 import { pendingMirrorsFor } from "@/lib/server/mirror-queue";
@@ -19,13 +20,13 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   const rawSubscriber = req.nextUrl.searchParams.get("subscriber") ?? "";
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const ip = clientIpFrom(req.headers);
   const gate = await authorizeRequest("public_read", { route: "/api/baskets/mirrors", ip });
   if (!gate.allowed && gate.error) {
     return NextResponse.json(gate.error.body, { status: gate.error.status, headers: gate.error.headers });
   }
 
-  // Stellar strkey, checked with StrKey and used verbatim. The
+  // Stellar str111, checked with StrKey and used verbatim. The
   // `/^0x[0-9a-fA-F]{40}$/` this used to carry did not just skip normalisation —
   // it rejected every real Stellar address, so this endpoint 400'd for all callers.
   const subscriber = parseAddressParam(rawSubscriber);

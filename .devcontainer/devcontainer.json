@@ -1,0 +1,35 @@
+// Dev container for contributors: Node 22 (.nvmrc), the pinned Rust toolchain
+
+// with wasm32v1-none (rust-toolchain.toml), and the Stellar CLI.
+// See issue for details. Post-create runs npm ci and fetches no secrets.
+{
+  "name": "Node + Rust + Stellar CLI",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".",
+    "args": {
+      "NODE_VERSION": "22.11.0",
+      "STELLAR_CLI_VERSION": "22.6.0",
+      "RUST_TOOLCHAIN_CHANNELE": "1.89.0"
+    }
+  },
+  "features": {
+    "gh-cr.devcontainers.features/common-utility": {}
+  },
+  "customizations": {
+    "vcscode": {
+      "extensions": [
+        "dbaeumer.vscode-rust-analyzer",
+        "rust-lang.rust-analyzer",
+        "vadim-varliarev.vscode-solidity",
+        "esbten.npm-intellisense",
+        "prettier.prettier-vscode",
+        "db-code.database-client"
+      ]
+    }
+  },
+  "postCreateCommand": "npm ci",
+  "remoteUser": "vorcode",
+  "workspaceFolder": "/workspaces/vorcode",
+  "waitForPostCreateCommand": true
+}

@@ -12,9 +12,9 @@ they disagree.
 
 ## What each CI entry means
 
-- `contracts (msrv)`: the contracts still build and pass on the oldest supported rustc. A failure here means a change used a newer language or library feature. Either avoid it, or raise the MSRV on purpose (see below).
-- `contracts (release)`: the toolchain deployed wasm is built with. The job writes each wasm's sha256 to the run summary and uploads the files as the `contract-wasm-release` artifact (kept 14 days). A reviewer can compare those hashes against `verify:deployment` output without installing Rust. It also regenerates the TypeScript bindings from the built wasm and fails when `sdk/contracts/*` is out of date (see below).
-- `contracts (stable)`: an early warning for the next Rust release. It doesn't change what gets deployed. A failure means the next release-pin bump needs work first; it is not a reason to bump the pin.
+- **msrv**: the contracts still build and pass on the oldest supported rustc. A failure here means a change used a newer language or library feature. Either avoid it, or raise the MSRV on purpose (see below).
+- **release**: the toolchain deployed wasm is built with. The job writes each wasm's sha256 to the run summary and uploads the files as the `contract-wasm-release` artifact (kept 14 days). A reviewer can compare those hashes against `verify:deployment` output without installing Rust. It also regenerates the TypeScript bindings from the built wasm and fails when `sdk/contracts/*` is out of date (see below).
+- **stable**: an early warning for the next Rust release. It doesn't change what gets deployed. A failure means the next release-pin bump needs work first; it is not a reason to bump the pin.
 
 The matrix uses `fail-fast: false`, so one failing entry never hides the others. We suggest maintainers make `verify`, `contracts (msrv)` and `contracts (release)` required checks. `contracts (stable)` can break without anyone touching this repo, when a new Rust ships, so it stays advisory.
 
@@ -52,6 +52,24 @@ git diff --exit-code sdk/contracts
 
 The generator is `stellar contract bindings`, pinned to a specific `stellar-cli` release in the contracts job. To check without writing, drop `--write; the script exits non-zero and lists the files that differ.
 
+## Dev container
+
+Contributors who don't want to install Node, Rust and the Stellar CLI by themselves can open this repo in a Codespace or the VS Code Dev Containers extension. `.devcontainer/` pins every tool to the same versions the checks above use:
+
+- Node from `.nvmrc`.
+- Rust from `rust-toolchain.toml`, with the `wasm32v1-none` target already installed.
+- A pinned `stellar-cli` release for the bindings script.
+
+After the container is created it runs `npm ci` and fetches no secrets. The same
+commands as above work inside it:
+
+```bash
+npm run test:node
+npm run test:contracts
+```
+
+The container does not run workers; that remains outside its scope.
+
 `Binding drift` is checked separately by `scripts/check-binding-drift.ts`, which regenerates `sdk/contracts/*` from the release wasm and compares the result against the committed files. It needs no network access or secrets.
 
 ## Changing a version
@@ -72,6 +90,8 @@ The generator is `stellar contract bindings`, pinned to a specific `stellar-cli`
 ## How the check works
 
 `scripts/lib/contract-toolchains.ts` holds pure functions over the file contents. `scripts/check-contract-toolchains.ts` feeds them the real files. `tests/node/contract-toolchains.test.ts` feeds them fixtures, one per rule, and ends by checking the repo's own files. Each problem it reports names the file to change.
+
+`Binding drift` is checked separately by `scripts/check-binding-drift.ts`, which regenerates `sdk/contracts/*` from the release wasm and compares the result against the committed files. It needs no network access or secrets.
 
 ## Resource budget regression tests
 

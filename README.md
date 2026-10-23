@@ -821,6 +821,8 @@ See [`docs/CONTRACT_STORAGE.md`](docs/CONTRACT_STORAGE.md) for the module-level 
 - At least one LLM API key configured in `.env.local`
 - Optional: a Neon account at [console.neon.tech](https://console.neon.tech) for the read-index
 
+New to the repo? See [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the contributor quick start, including how to run a single node test or a single contract test.
+
 git clone https://github.com/enliven17/mimir
 cd mimir
 npm install

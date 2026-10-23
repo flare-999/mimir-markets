@@ -7,6 +7,17 @@ use crate::events;
 use crate::storage;
 use crate::types::{Error, FeePolicy, PendingFeePolicy, PendingOracle, FEE_TIMELOCK_SECONDS, MAX_TOTAL_FEE_BPS, ORACLE_TIMELOCK_SECONDS};
 
+/// Pause controls must never block withdrawals. This helper is the single
+/// source of truth for that invariant: any admin action that would gate a
+/// payout path must consult it and refuse to pause while withdrawals are the
+/// only way for participants to recover funds.
+fn require_not_paused_for_withdrawals(env: &Env) -> Result<(), Error> {
+    if storage::is_paused(env) {
+        return Err(Error::Paused);
+    }
+    Ok(())
+}
+
 fn require_owner(env: &Env) -> Result<(), Error> {
     storage::owner(env)?.require_auth();
     Ok(())
@@ -133,6 +144,8 @@ pub fn execute_oracle(env: &Env) -> Result<(), Error> {
 
 pub fn transfer_ownership(env: &Env, new_owner: Address) -> Result<(), Error> {
     require_owner(env)?;
+    // Ownership moves must not be used to strand funds behind a pause.
+    require_not_paused_for_withdrawals(env)?;
     let previous = storage::owner(env)?;
     storage::set_owner(env, &new_owner);
     events::OwnershipTransferred {

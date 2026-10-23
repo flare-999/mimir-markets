@@ -1,4 +1,4 @@
-import Link from "next/link";
+import { Link } from "@/i18n/navigation";
 import { cachedFor } from "@/lib/server/ttl-cache";
 import { getClaimSummaries, getClaimCount, getOracle, getOwner } from "@/lib/contract";
 import { readAgentBalances } from "@/lib/agent-wallets";

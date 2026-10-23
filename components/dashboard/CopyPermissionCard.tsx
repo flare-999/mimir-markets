@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import { formatAtomicUsdc } from "@/lib/usdc";
 import { computeCopyUsageFromExecutions, type CopyUsageExecutionRow } from "@/lib/copy-trading";
 import type { CopyPermissionFeedbackView, CopyPermissionStatus } from "@/lib/copy-permission-feedback";
@@ -31,6 +31,10 @@ export function CopyPermissionCard({
 }) {
   const theme = STATUS_THEME[feedback.status] ?? STATUS_THEME.invalid;
   const Icon = theme.icon;
+
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const confirmTitleId = useId();
+  const confirmDescId = useId();
 
   // Resolve timezone only after mount so SSR markup stays stable and the reset
   // stamps reflect the viewer's zone (mirrors components/LiveDeadline.tsx).
@@ -187,7 +191,7 @@ export function CopyPermissionCard({
         <div className="mt-4 flex justify-end">
           <button
             type="button"
-            onClick={() => onRevoke(feedback.permissionId!)}
+            onClick={() => setConfirmOpen(true)}
             disabled={isRevoking}
             className="rounded border border-pv-danger/40 bg-pv-danger/10 px-3 py-1.5 font-mono text-xs font-semibold text-pv-danger transition-colors hover:bg-pv-danger/20 disabled:opacity-50"
             aria-label={`Revoke copy permission ${feedback.permissionId}`}
@@ -196,6 +200,140 @@ export function CopyPermissionCard({
           </button>
         </div>
       )}
+
+      {confirmOpen && feedback.permissionId && (
+        <RevokeConfirmDialog
+          permissionId={feedback.permissionId}
+          titleId={confirmTitleId}
+          descId={confirmDescId}
+          isRevoking={isRevoking}
+          onCancel={() => setConfirmOpen(false)}
+          onConfirm={() => {
+            setConfirmOpen(false);
+            onRevoke?.(feedback.permissionId!);
+          }}
+        />
+      )}
     </section>
+  );
+}
+
+function RevokeConfirmDialog({
+  permissionId,
+  titleId,
+  descId,
+  isRevoking,
+  onCancel,
+  onConfirm,
+}: {
+  permissionId: string;
+  titleId: string;
+  descId: string;
+  isRevoking?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const previouslyFocused = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    cancelRef.current?.focus();
+    return () => {
+      previouslyFocused.current?.focus?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancel();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const root = dialogRef.current;
+      if (!root) return;
+      const focusable = root.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (event.shiftKey && (active === first || !root.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !root.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [onCancel]);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+    >
+      <div
+        ref={dialogRef}
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        aria-describedby={descId}
+        className="w-full max-w-md rounded-2xl border border-pv-ink/10 bg-pv-surface p-5 shadow-xl"
+      >
+        <h2 id={titleId} className="text-sm font-semibold text-pv-text">
+          Revoke copy permission?
+        </h2>
+        <div id={descId} className="mt-2 space-y-2 text-xs text-pv-muted">
+          <p>
+            Revoking{" "}
+            <span className="font-mono text-pv-text">{permissionId}</span> is owner-signed and stops Mimir from
+            executing further copies for this permission.
+          </p>
+          <p>
+            This does <span className="font-semibold text-pv-text">not</span> revoke on-chain spend allowances. Any
+            existing token approvals remain in place and must be revoked separately from your wallet.
+          </p>
+          <p>
+            See the{" "}
+            <a
+              href="/docs/copy-permissions#spend-permissions"
+              className="font-medium text-pv-cyan underline underline-offset-2 hover:text-pv-cyan/80"
+              target="_blank"
+              rel="noreferrer"
+            >
+              spend-permission explanation
+            </a>{" "}
+            for details.
+          </p>
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            ref={cancelRef}
+            type="button"
+            onClick={onCancel}
+            className="rounded border border-pv-ink/10 bg-pv-surface2/40 px-3 py-1.5 font-mono text-xs font-semibold text-pv-text transition-colors hover:bg-pv-surface2/70"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={isRevoking}
+            className="rounded border border-pv-danger/40 bg-pv-danger/10 px-3 py-1.5 font-mono text-xs font-semibold text-pv-danger transition-colors hover:bg-pv-danger/20 disabled:opacity-50"
+          >
+            {isRevoking ? "Revoking…" : "Revoke Permission"}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
