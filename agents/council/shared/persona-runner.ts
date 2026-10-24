@@ -106,7 +106,9 @@ export async function evaluatePersonaForClaim(
   }
 
   // LLM-based path (llm-biased, specialist, micro).
-  const evidence = await getOrFetchEvidence(claim.id, claim.resolutionUrl, ctx.evidenceCache);
+  const evidence = await getOrFetchEvidence(claim.id, claim.resolutionUrl, ctx.evidenceCache, undefined, {
+    category: claim.category,
+  });
   if (evidence.fetcher === "none") {
     return {
       shouldStake: false,

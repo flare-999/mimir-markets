@@ -41,7 +41,6 @@
 
 import { RESEARCH_ADAPTERS } from "../../../lib/research/adapters";
 import type { EvidenceCacheEntry } from "./types";
-import { validateEvidenceIntegrity } from "./evidence-integrity";
 
 /** 10 minutes — tighter than the oracle's 15-min commitment window. */
 export const COUNCIL_DEFAULT_MAX_EVIDENCE_AGE_MS = 10 * 60_000;
@@ -99,99 +98,6 @@ export function maxAgeForCategory(category: string | undefined | null): number {
     }
   }
   return tightest;
-}
-
-/**
- * Maximum number of entries retained in the module-level evidence cache.
- * Bounds memory when many distinct claims/URLs are evaluated across cycles.
- */
-export const COUNCIL_EVIDENCE_CACHE_MAX_ENTRIES = 500;
-
-interface CachedEvidence {
-  entry:     EvidenceCacheEntry;
-  fetchedAt: number;
-}
-
-/**
- * Module-level cache keyed by `claimId::url`, persisted across council cycles.
- *
- * Entries younger than `maxAgeForCategory(category)` are reused; stale entries
- * are evicted and refetched.  Entries for claims that are no longer joinable are
- * evicted on each `pruneEvidenceCache` call.  The map is capped at
- * `COUNCIL_EVIDENCE_CACHE_MAX_ENTRIES` (oldest entries evicted first).
- */
-const evidenceCache = new Map<string, CachedEvidence>();
-
-function cacheKey(claimId: string, url: string): string {
-  return `${claimId}::${url}`;
-}
-
-/**
- * Evict entries whose claim id is not in `joinableClaimIds`, then enforce the
- * size cap by dropping the oldest entries.  Call once per council cycle.
- */
-export function pruneEvidenceCache(joinableClaimIds: Iterable<string>): void {
-  const joinable = new Set(joinableClaimIds);
-  for (const [key, cached] of evidenceCache) {
-    const claimId = key.slice(0, key.indexOf("::"));
-    if (!joinable.has(claimId)) {
-      evidenceCache.delete(key);
-      continue;
-    }
-    // Drop entries that are already stale for their category.
-    if (!checkEvidenceFreshness(cached.entry, cached.entry.category).fresh) {
-      evidenceCache.delete(key);
-    }
-  }
-  // Enforce size cap: Map preserves insertion order, so drop from the front.
-  while (evidenceCache.size > COUNCIL_EVIDENCE_CACHE_MAX_ENTRIES) {
-    const oldest = evidenceCache.keys().next().value;
-    if (oldest === undefined) break;
-    evidenceCache.delete(oldest);
-  }
-}
-
-/** Clear the module-level cache (test helper). */
-export function clearEvidenceCache(): void {
-  evidenceCache.clear();
-}
-
-/**
- * Return cached evidence for `claimId` + `url` when it is still fresh and passes
- * integrity validation; otherwise invoke `fetcher`, store the result, and return
- * it.  Stale or invalid entries are evicted before refetching.
- */
-export async function getOrFetchEvidence(
-  claimId:  string,
-  url:      string,
-  category: string | undefined | null,
-  fetcher:  () => Promise<EvidenceCacheEntry>,
-  now:      number = Date.now(),
-): Promise<EvidenceCacheEntry> {
-  const key = cacheKey(claimId, url);
-  const cached = evidenceCache.get(key);
-
-  if (cached) {
-    const fresh = checkEvidenceFreshness(cached.entry, category, now).fresh;
-    const valid = validateEvidenceIntegrity(cached.entry).ok;
-    if (fresh && valid) {
-      return cached.entry;
-    }
-    evidenceCache.delete(key);
-  }
-
-  const entry = await fetcher();
-  const fetchedAt = entry.fetchedAt ?? now;
-  evidenceCache.set(key, { entry, fetchedAt });
-
-  // Enforce size cap on insert as well.
-  while (evidenceCache.size > COUNCIL_EVIDENCE_CACHE_MAX_ENTRIES) {
-    const oldest = evidenceCache.keys().next().value;
-    if (oldest === undefined) break;
-    evidenceCache.delete(oldest);
-  }
-
-  return entry;
 }
 
 /**
